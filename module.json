@@ -2,7 +2,7 @@
   "id": "mk-compendiums",
   "title": "MK-Compendiums",
   "description": "Browse and search compendiums for all users, with GM-only tools to export and import packs, folders, or Compendium Directory folders as JSON.",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "compatibility": {
     "minimum": "12",
     "verified": "14",
@@ -18,7 +18,7 @@
   ],
   "url": "https://github.com/fchrysoulas/MK-Compendiums",
   "manifest": "https://github.com/fchrysoulas/MK-Compendiums/releases/latest/download/module.json",
-  "download": "https://github.com/fchrysoulas/MK-Compendiums/releases/download/v1.3.0/mk-compendiums.zip",
+  "download": "https://github.com/fchrysoulas/MK-Compendiums/releases/download/v1.3.1/mk-compendiums.zip",
   "readme": "https://github.com/fchrysoulas/MK-Compendiums/blob/main/README.md",
   "changelog": "https://github.com/fchrysoulas/MK-Compendiums/blob/main/CHANGELOG.md",
   "bugs": "https://github.com/fchrysoulas/MK-Compendiums/issues"

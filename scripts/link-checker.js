@@ -1,4 +1,5 @@
 import {
+  collectionValues,
   deepClone,
   documentIdOf,
   ensurePackWritable,
@@ -6,7 +7,9 @@ import {
   escapeHtml,
   getDocumentClassForPack,
   getDocumentSource,
+  getFolderName,
   getPackTitle,
+  normalizeFolderReference,
   notifyInfo,
   resetCompendiumIndexCache,
   resolvePack,
@@ -34,8 +37,113 @@ function getPackIdFromLegacyCompendiumUuid(value) {
   return game.packs?.get?.(packId) ? packId : null;
 }
 
-function isItemPack(pack) {
-  return (pack?.documentName ?? pack?.metadata?.type) === "Item";
+function getPackDocumentName(pack) {
+  return pack?.documentName ?? pack?.metadata?.type ?? "Document";
+}
+
+function packCanContainItems(pack) {
+  return ["Item", "Actor"].includes(getPackDocumentName(pack));
+}
+
+function getEmbeddedItems(source) {
+  if (Array.isArray(source?.items)) return source.items;
+  if (Array.isArray(source?.items?.contents)) return source.items.contents;
+  return [];
+}
+
+function getItemSourceUuid(pack, documentId, itemId, { actorId = null } = {}) {
+  if (actorId && itemId) return `Compendium.${pack.collection}.${actorId}.Item.${itemId}`;
+  return `Compendium.${pack.collection}.${documentId}`;
+}
+
+function getWorldItemSourceUuid(documentId, itemId, { actorId = null } = {}) {
+  if (actorId && itemId) return `Actor.${actorId}.Item.${itemId}`;
+  return `Item.${documentId}`;
+}
+
+function getWorldFolderName(folderId) {
+  if (!folderId) return "";
+  const folder = game.folders?.get?.(folderId);
+  return folder ? getFolderName(folder) : String(folderId);
+}
+
+function getItemContexts(pack, document, source, documentId) {
+  const documentName = getPackDocumentName(pack);
+
+  if (documentName === "Item") {
+    const itemId = documentIdOf(source) ?? documentId;
+    return [{
+      itemSource: source,
+      itemPath: [],
+      itemId,
+      actorId: null,
+      actorName: "",
+      actorType: "",
+      actorUuid: "",
+      containerName: "",
+      containerType: "Compendium Item"
+    }];
+  }
+
+  if (documentName !== "Actor") return [];
+
+  const actorId = documentIdOf(source) ?? documentId;
+  const actorName = source?.name ?? document?.name ?? "(Unnamed Actor)";
+  const actorType = source?.type ?? "Actor";
+  const actorUuid = `Compendium.${pack.collection}.${actorId}`;
+
+  return getEmbeddedItems(source)
+    .map((itemSource, index) => ({
+      itemSource,
+      itemPath: ["items", index],
+      itemId: documentIdOf(itemSource),
+      actorId,
+      actorName,
+      actorType,
+      actorUuid,
+      containerName: actorName,
+      containerType: actorType
+    }))
+    .filter(context => context.itemSource && context.itemId);
+}
+
+function getWorldItemContexts(document, source, documentName) {
+  const documentId = documentIdOf(source) ?? documentIdOf(document);
+  if (!documentId) return [];
+
+  if (documentName === "Item") {
+    return [{
+      itemSource: source,
+      itemPath: [],
+      itemId: documentId,
+      actorId: null,
+      actorName: "",
+      actorType: "",
+      actorUuid: "",
+      containerName: "",
+      containerType: "World Item"
+    }];
+  }
+
+  if (documentName !== "Actor") return [];
+
+  const actorName = source?.name ?? document?.name ?? "(Unnamed Actor)";
+  const actorType = source?.type ?? "Actor";
+  const actorUuid = `Actor.${documentId}`;
+
+  return getEmbeddedItems(source)
+    .map((itemSource, index) => ({
+      itemSource,
+      itemPath: ["items", index],
+      itemId: documentIdOf(itemSource),
+      actorId: documentId,
+      actorName,
+      actorType,
+      actorUuid,
+      containerName: actorName,
+      containerType: actorType
+    }))
+    .filter(context => context.itemSource && context.itemId);
 }
 
 export function normalizeReferenceUuid(value, { legacyCompendium = false } = {}) {
@@ -205,8 +313,19 @@ function extractReferencesFromString(value, path) {
   return references;
 }
 
+function pathPartEquals(value, expected) {
+  return String(value ?? "").toLowerCase() === expected;
+}
+
 function shouldSkipPath(path) {
-  return path?.[0] === "_stats";
+  if (!Array.isArray(path) || !path.length) return false;
+  if (pathPartEquals(path[0], "_stats")) return true;
+
+  const isFlagsPath = pathPartEquals(path[0], "flags");
+  if (isFlagsPath && pathPartEquals(path[1], "scene-packer")) return true;
+  if (isFlagsPath && pathPartEquals(path[1], "core") && pathPartEquals(path[path.length - 1], "sourceid")) return true;
+
+  return false;
 }
 
 export function findUuidReferencesInSource(source) {
@@ -260,13 +379,87 @@ async function resolveUuid(uuid, cache) {
   return promise;
 }
 
-export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null, onPackScanned = null } = {}) {
+async function collectBrokenLinksForItemContext({
+  brokenLinks,
+  resolutionCache,
+  sourceScope,
+  itemContext,
+  documentId,
+  documentName,
+  folderId = null,
+  folderName = "",
+  pack = null,
+  packTitle = "",
+  worldCollection = ""
+}) {
+  const itemSource = itemContext.itemSource;
+  const itemId = itemContext.itemId;
+  const itemName = itemSource?.name ?? "(Unnamed Item)";
+  const itemType = itemSource?.type ?? "Item";
+  const itemImg = itemSource?.img ?? itemSource?.thumb ?? itemSource?.thumbnail ?? "icons/svg/item-bag.svg";
+
+  for (const reference of findUuidReferencesInSource(itemSource)) {
+    const fullPath = [...itemContext.itemPath, ...reference.path];
+    const fullPathLabel = formatReferencePath(fullPath);
+    const resolution = await resolveUuid(reference.normalizedUuid, resolutionCache);
+    if (resolution.found) continue;
+
+    const sourceUuid = sourceScope === "world"
+      ? getWorldItemSourceUuid(documentId, itemId, { actorId: itemContext.actorId })
+      : getItemSourceUuid(pack, documentId, itemId, { actorId: itemContext.actorId });
+
+    brokenLinks.push({
+      id: `${sourceScope}:${pack?.collection ?? worldCollection}:${documentId}:${itemId}:${fullPathLabel}:${reference.normalizedUuid}:${reference.start ?? 0}`,
+      sourceScope,
+      packId: pack?.collection ?? "",
+      packTitle: packTitle || (sourceScope === "world" ? "World" : getPackTitle(pack)),
+      worldCollection,
+      documentName,
+      documentId,
+      folderId,
+      folderName,
+      itemId,
+      itemName,
+      itemType,
+      itemImg,
+      actorId: itemContext.actorId,
+      actorName: itemContext.actorName,
+      actorType: itemContext.actorType,
+      actorUuid: itemContext.actorUuid,
+      containerName: itemContext.containerName,
+      containerType: itemContext.containerType,
+      sourceName: itemName,
+      sourceType: itemType,
+      sourceImg: itemImg,
+      sourceUuid,
+      reason: resolution.reason,
+      ...reference,
+      path: fullPath,
+      pathLabel: fullPathLabel,
+      referencePath: reference.path,
+      referencePathLabel: reference.pathLabel,
+      itemPath: itemContext.itemPath,
+      itemPathLabel: formatReferencePath(itemContext.itemPath)
+    });
+  }
+}
+
+function sortBrokenLinks(brokenLinks) {
+  return brokenLinks.sort((a, b) =>
+    (a.sourceScope ?? "").localeCompare(b.sourceScope ?? "")
+    || (a.packTitle ?? "").localeCompare(b.packTitle ?? "")
+    || (a.sourceName ?? "").localeCompare(b.sourceName ?? "")
+    || (a.pathLabel ?? "").localeCompare(b.pathLabel ?? "")
+    || (a.normalizedUuid ?? "").localeCompare(b.normalizedUuid ?? "")
+  );
+}
+
+export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null, onPackScanned = null, resolutionCache = new Map() } = {}) {
   const brokenLinks = [];
-  const resolutionCache = new Map();
 
   for (const pack of packs ?? []) {
     if (!pack?.getDocuments) continue;
-    if (!isItemPack(pack)) continue;
+    if (!packCanContainItems(pack)) continue;
 
     let documents = [];
     try {
@@ -283,22 +476,17 @@ export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null,
       if (!source || !documentId) continue;
       if (shouldScanDocument && !shouldScanDocument(document, source, pack)) continue;
 
-      for (const reference of findUuidReferencesInSource(source)) {
-        const resolution = await resolveUuid(reference.normalizedUuid, resolutionCache);
-        if (resolution.found) continue;
-
-        brokenLinks.push({
-          id: `${pack.collection}:${documentId}:${reference.pathLabel}:${reference.normalizedUuid}:${reference.start ?? 0}`,
-          packId: pack.collection ?? pack.metadata?.id ?? pack.metadata?.name ?? "",
-          packTitle: getPackTitle(pack),
-          documentName: pack.documentName ?? pack.metadata?.type ?? "Document",
+      for (const itemContext of getItemContexts(pack, document, source, documentId)) {
+        await collectBrokenLinksForItemContext({
+          brokenLinks,
+          resolutionCache,
+          sourceScope: "compendium",
+          itemContext,
           documentId,
-          sourceName: source.name ?? document.name ?? "(Unnamed)",
-          sourceType: source.type ?? pack.documentName ?? pack.metadata?.type ?? "Document",
-          sourceImg: source.img ?? source.thumb ?? source.thumbnail ?? "icons/svg/book.svg",
-          sourceUuid: `Compendium.${pack.collection}.${documentId}`,
-          reason: resolution.reason,
-          ...reference
+          documentName: getPackDocumentName(pack),
+          folderId: normalizeFolderReference(source?.folder),
+          pack,
+          packTitle: getPackTitle(pack)
         });
       }
     }
@@ -306,12 +494,50 @@ export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null,
     onPackScanned?.(pack, { failed: false });
   }
 
-  return brokenLinks.sort((a, b) =>
-    a.packTitle.localeCompare(b.packTitle)
-    || a.sourceName.localeCompare(b.sourceName)
-    || a.pathLabel.localeCompare(b.pathLabel)
-    || a.normalizedUuid.localeCompare(b.normalizedUuid)
-  );
+  return sortBrokenLinks(brokenLinks);
+}
+
+export async function findBrokenLinksInWorld({ includeItems = true, includeActors = true, resolutionCache = new Map() } = {}) {
+  const brokenLinks = [];
+  const worldDocuments = [];
+
+  if (includeItems) {
+    for (const document of collectionValues(game.items)) {
+      worldDocuments.push({ document, documentName: "Item", worldCollection: "World Items" });
+    }
+  }
+
+  if (includeActors) {
+    for (const document of collectionValues(game.actors)) {
+      worldDocuments.push({ document, documentName: "Actor", worldCollection: "World Actors" });
+    }
+  }
+
+  for (const { document, documentName, worldCollection } of worldDocuments) {
+    const source = getDocumentSource(document);
+    const documentId = documentIdOf(source) ?? documentIdOf(document);
+    if (!source || !documentId) continue;
+
+    const folderId = normalizeFolderReference(source?.folder);
+    const folderName = getWorldFolderName(folderId);
+
+    for (const itemContext of getWorldItemContexts(document, source, documentName)) {
+      await collectBrokenLinksForItemContext({
+        brokenLinks,
+        resolutionCache,
+        sourceScope: "world",
+        itemContext,
+        documentId,
+        documentName,
+        folderId,
+        folderName,
+        packTitle: worldCollection,
+        worldCollection
+      });
+    }
+  }
+
+  return sortBrokenLinks(brokenLinks);
 }
 
 function replaceInlineUuid(text, rawUuid, replacementUuid) {
@@ -361,11 +587,108 @@ function getFixedStringValue(currentValue, link, { replacementUuid = "", clear =
   return replaceDirectUuid(text, link.rawUuid, link.normalizedUuid, replacementUuid);
 }
 
+async function validateReplacementUuid(replacementUuid, { clear = false } = {}) {
+  const normalizedReplacement = clear ? "" : normalizeReplacementUuid(replacementUuid);
+  if (clear) return normalizedReplacement;
+
+  if (!normalizedReplacement) {
+    warn("Enter a valid compendium UUID, such as Compendium.package.pack.documentId.");
+    return null;
+  }
+
+  const resolution = await resolveUuid(normalizedReplacement, new Map());
+  if (!resolution.found) {
+    warn(`Replacement compendium UUID could not be resolved: ${normalizedReplacement}`);
+    return null;
+  }
+
+  return normalizedReplacement;
+}
+
+async function applyWorldBrokenLinkFix(link, { replacementUuid = "", clear = false } = {}) {
+  const normalizedReplacement = await validateReplacementUuid(replacementUuid, { clear });
+  if (normalizedReplacement === null) return null;
+
+  try {
+    const isEmbeddedItem = !!link.actorId;
+    const document = isEmbeddedItem
+      ? game.actors?.get?.(link.actorId)
+      : game.items?.get?.(link.documentId);
+
+    if (!document) {
+      warn(isEmbeddedItem ? "Assigned actor not found." : "Source world item not found.");
+      return null;
+    }
+
+    const itemDocument = isEmbeddedItem
+      ? document.items?.get?.(link.itemId)
+      : document;
+
+    if (!itemDocument) {
+      warn("Source item not found.");
+      return null;
+    }
+
+    const referencePath = link.referencePath ?? link.path;
+    const source = deepClone(getDocumentSource(itemDocument));
+    const currentValue = getValueAtPath(source, referencePath);
+    if (typeof currentValue !== "string") {
+      warn("The stored reference is no longer a string and cannot be updated automatically.");
+      return null;
+    }
+
+    const nextValue = getFixedStringValue(currentValue, link, {
+      replacementUuid: normalizedReplacement,
+      clear
+    });
+
+    if (nextValue === currentValue) {
+      warn("No matching broken compendium UUID was found at that path. Re-run the link check and try again.");
+      return null;
+    }
+
+    const updatePath = getUpdatePath(referencePath);
+    let updateData = isEmbeddedItem ? { _id: link.itemId } : {};
+
+    if (updatePath) updateData[updatePath] = nextValue;
+    else {
+      if (!setValueAtPath(source, referencePath, nextValue)) {
+        warn("Could not update the broken compendium UUID path.");
+        return null;
+      }
+
+      source._id = link.itemId;
+      updateData = source;
+      if (!isEmbeddedItem) delete updateData._id;
+    }
+
+    if (isEmbeddedItem) await document.updateEmbeddedDocuments("Item", [updateData]);
+    else await document.update(updateData);
+
+    const action = clear ? "cleared" : "replaced";
+    notifyInfo(`Broken compendium UUID ${action} in ${link.sourceName}.`);
+    return {
+      sourceScope: "world",
+      documentId: link.documentId,
+      itemId: link.itemId,
+      actorId: link.actorId,
+      path: link.pathLabel,
+      replacementUuid: normalizedReplacement,
+      cleared: clear
+    };
+  } catch (err) {
+    error("Failed to fix broken world item compendium UUID.", err);
+    return null;
+  }
+}
+
 export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = false } = {}) {
   if (!game.user?.isGM) {
     warn("Only the GM can fix compendium links.");
     return null;
   }
+
+  if (link?.sourceScope === "world") return applyWorldBrokenLinkFix(link, { replacementUuid, clear });
 
   const pack = resolvePack(link?.packId);
   if (!pack) {
@@ -373,19 +696,8 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
     return null;
   }
 
-  const normalizedReplacement = clear ? "" : normalizeReplacementUuid(replacementUuid);
-  if (!clear && !normalizedReplacement) {
-    warn("Enter a valid compendium UUID, such as Compendium.package.pack.documentId.");
-    return null;
-  }
-
-  if (!clear) {
-    const resolution = await resolveUuid(normalizedReplacement, new Map());
-    if (!resolution.found) {
-      warn(`Replacement compendium UUID could not be resolved: ${normalizedReplacement}`);
-      return null;
-    }
-  }
+  const normalizedReplacement = await validateReplacementUuid(replacementUuid, { clear });
+  if (normalizedReplacement === null) return null;
 
   if (!await ensurePackWritable(pack)) return null;
 
@@ -451,13 +763,21 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
 }
 
 export function getBrokenLinkFixDialogContent(link) {
+  const assignedActor = link.actorName
+    ? `${link.actorName}${link.actorType ? ` (${link.actorType})` : ""}`
+    : "None - standalone item";
+  const sourceLabel = link.sourceScope === "world" ? "Source" : "Pack";
+
   return `
     <form class="mkcm-broken-link-form">
-      <p><strong>Source:</strong> ${escapeHtml(link.sourceName)} (${escapeHtml(link.packTitle)})</p>
+      <p><strong>Item:</strong> ${escapeHtml(link.itemName ?? link.sourceName)}${link.itemType ? ` (${escapeHtml(link.itemType)})` : ""}</p>
+      <p><strong>Assigned Actor:</strong> ${escapeHtml(assignedActor)}</p>
+      <p><strong>${sourceLabel}:</strong> ${escapeHtml(link.packTitle)}</p>
+      <p><strong>Source UUID:</strong> <code>${escapeHtml(link.sourceUuid)}</code></p>
       <p><strong>Field:</strong> <code>${escapeHtml(link.pathLabel)}</code></p>
       <p><strong>Broken compendium UUID:</strong> <code>${escapeHtml(link.normalizedUuid)}</code></p>
       <div class="form-group">
-        <label>Replacement UUID</label>
+        <label>Replacement compendium UUID</label>
         <input type="text" name="replacementUuid" value="" placeholder="Compendium.package.pack.documentId" autocomplete="off" />
       </div>
       <p class="notes">Replace validates that the target exists in a compendium before updating the item. Clear removes this broken link from the field.</p>

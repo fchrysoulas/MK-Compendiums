@@ -19,6 +19,7 @@ import {
 import {
   applyBrokenLinkFix,
   findBrokenLinksInPacks,
+  findBrokenLinksInWorld,
   openBrokenLinkFixDialog
 } from './link-checker.js';
 
@@ -44,6 +45,7 @@ Hooks.once("init", () => {
       openImportDialog,
       openCompendiumDirectoryFolderImportDialog,
       findBrokenLinksInPacks,
+      findBrokenLinksInWorld,
       applyBrokenLinkFix,
       openBrokenLinkFixDialog,
       openCompendiumBrowser,

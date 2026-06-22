@@ -260,12 +260,129 @@ export function injectStyles() {
       min-width: 0;
     }
 
+    .mkcm-broken-link-row {
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px;
+    }
+
+    .mkcm-broken-link-row .mkcm-result-main {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .mkcm-broken-link-row .mkcm-row-tools {
+      padding-top: 2px;
+    }
+
+    .mkcm-broken-link-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .mkcm-broken-link-title {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 700;
+    }
+
+    .mkcm-broken-link-badges {
+      flex: 0 0 auto;
+      display: flex;
+      gap: 4px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .mkcm-broken-link-badge {
+      padding: 1px 5px;
+      border: 1px solid var(--color-border-light-tertiary, rgba(0,0,0,0.25));
+      border-radius: 4px;
+      font-size: 10px;
+      opacity: 0.85;
+    }
+
+    .mkcm-broken-link-target,
+    .mkcm-broken-link-details {
+      min-width: 0;
+    }
+
+    .mkcm-broken-link-target {
+      display: grid;
+      grid-template-columns: 86px minmax(0, 1fr);
+      gap: 6px;
+      align-items: center;
+    }
+
+    .mkcm-broken-link-target span,
+    .mkcm-broken-link-details span {
+      font-size: 10px;
+      opacity: 0.72;
+    }
+
+    .mkcm-broken-link-details {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 3px 10px;
+      font-size: 11px;
+    }
+
+    .mkcm-broken-link-details div {
+      min-width: 0;
+      display: grid;
+      grid-template-columns: 78px minmax(0, 1fr);
+      gap: 5px;
+      align-items: baseline;
+    }
+
+    .mkcm-broken-link-details strong {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+
+    .mkcm-broken-link-target code,
     .mkcm-broken-link-row .mkcm-result-meta code {
       display: inline-block;
       max-width: 100%;
       overflow: hidden;
       text-overflow: ellipsis;
       vertical-align: bottom;
+    }
+
+    .mkcm-broken-link-details code {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 720px) {
+      .mkcm-broken-link-header {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .mkcm-broken-link-badges {
+        justify-content: flex-start;
+      }
+
+      .mkcm-broken-link-target,
+      .mkcm-broken-link-details {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .mkcm-broken-link-target code {
+      white-space: nowrap;
     }
 
     .mkcm-broken-link-form code {

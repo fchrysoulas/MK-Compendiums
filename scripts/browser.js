@@ -19,7 +19,7 @@ import {
 } from './utils.js';
 import { confirmExportAction, exportPackToJson } from './exporter.js';
 import { openImportDialog } from './importer.js';
-import { findBrokenLinksInPacks, openBrokenLinkFixDialog } from './link-checker.js';
+import { findBrokenLinksInPacks, findBrokenLinksInWorld } from './link-checker.js';
 import { MODULE_VERSION } from './constants.js';
 
 const BROWSER_WINDOW_TITLE = `MK Compendium Browser v${MODULE_VERSION}`;
@@ -227,8 +227,23 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     return packs;
   }
 
-  getCandidateItemPacks() {
-    return this.getCandidatePacks().filter(pack => (pack.documentName ?? pack.metadata?.type) === "Item");
+  getCandidateItemSourcePacks() {
+    return this.getCandidatePacks().filter(pack => ["Item", "Actor"].includes(pack.documentName ?? pack.metadata?.type));
+  }
+
+  canIncludeWorldItemSources() {
+    if (this.browserState.documentName && !["Item", "Actor"].includes(this.browserState.documentName)) return false;
+    return true;
+  }
+
+  getWorldItemSourceOptions() {
+    if (!this.canIncludeWorldItemSources()) return { includeWorld: false, includeItems: false, includeActors: false };
+
+    return {
+      includeWorld: true,
+      includeItems: !this.browserState.documentName || this.browserState.documentName === "Item",
+      includeActors: !this.browserState.documentName || this.browserState.documentName === "Actor"
+    };
   }
 
   async runSearch({ render = true, force = false } = {}) {
@@ -334,12 +349,14 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
   async runBrokenLinkCheck({ render = true } = {}) {
     if (!this.canManageCompendiums) {
-      warn("Only the GM can check and fix compendium links.");
+      warn("Only the GM can check compendium links.");
       return;
     }
 
     const requestId = ++this._searchRequest;
-    const packs = this.getCandidateItemPacks();
+    const packs = this.getCandidateItemSourcePacks();
+    const worldOptions = this.getWorldItemSourceOptions();
+    const includeWorld = worldOptions.includeWorld;
     const folderFilters = new Map();
 
     if (this.browserState.packId && this.browserState.folderId) {
@@ -353,13 +370,13 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     this.browserState.results = [];
     this.browserState.loading = true;
     this.browserState.searched = true;
-    this.browserState.message = packs.length
-      ? `Checking compendium UUID links in ${packs.length} item pack(s)...`
-      : "No matching item compendium packs to check.";
+    this.browserState.message = packs.length || includeWorld
+      ? `Checking item compendium UUID links in ${packs.length} pack(s)${includeWorld ? " and world item data" : ""}...`
+      : "No matching Item or Actor compendium packs or world items to check.";
 
     if (render) this.render(true);
 
-    if (!packs.length) {
+    if (!packs.length && !includeWorld) {
       this.browserState.loading = false;
       if (render) this.render(true);
       return;
@@ -367,7 +384,8 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
     try {
       let failedPacks = 0;
-      const linkResults = await findBrokenLinksInPacks(packs, {
+      const resolutionCache = new Map();
+      const compendiumLinkResults = await findBrokenLinksInPacks(packs, {
         shouldScanDocument: (_document, source, pack) => {
           const folderFilter = folderFilters.get(this.getPackCacheKey(pack));
           if (!folderFilter) return true;
@@ -375,8 +393,22 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         },
         onPackScanned: (_pack, result) => {
           if (result?.failed) failedPacks += 1;
-        }
+        },
+        resolutionCache
       });
+      const worldLinkResults = includeWorld ? await findBrokenLinksInWorld({
+        includeItems: worldOptions.includeItems,
+        includeActors: worldOptions.includeActors,
+        resolutionCache
+      }) : [];
+      const linkResults = [...compendiumLinkResults, ...worldLinkResults]
+        .sort((a, b) =>
+          (a.sourceScope ?? "").localeCompare(b.sourceScope ?? "")
+          || (a.packTitle ?? "").localeCompare(b.packTitle ?? "")
+          || (a.sourceName ?? "").localeCompare(b.sourceName ?? "")
+          || (a.pathLabel ?? "").localeCompare(b.pathLabel ?? "")
+          || (a.normalizedUuid ?? "").localeCompare(b.normalizedUuid ?? "")
+        );
 
       if (requestId !== this._searchRequest) return;
 
@@ -385,7 +417,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         ? `${linkResults.length} broken item compendium UUID link(s) found.${failedPacks ? ` ${failedPacks} pack(s) could not be checked.` : ""}`
         : failedPacks
           ? `No broken item compendium UUID links found. ${failedPacks} pack(s) could not be checked.`
-          : "No broken item compendium UUID links found.";
+          : "No broken item compendium UUID links found in matching compendiums or world items.";
     } catch (err) {
       if (requestId !== this._searchRequest) return;
       this.browserState.linkResults = [];
@@ -410,7 +442,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         <div class="mkcm-browser-search-row">
           <input type="search" name="query" value="${escapeHtml(this.browserState.query)}" placeholder="Search names, descriptions, packs, folders..." autocomplete="off" />
           <button type="button" data-action="search"><i class="fas fa-search"></i> Search</button>
-          ${this.canManageCompendiums ? '<button type="button" data-action="check-links" title="Check matching item compendiums for broken compendium UUID links"><i class="fas fa-unlink"></i> Check Links</button>' : ""}
+          ${this.canManageCompendiums ? '<button type="button" data-action="check-links" title="Check item data in matching Item/Actor compendiums and world items for broken compendium UUID links"><i class="fas fa-unlink"></i> Check Links</button>' : ""}
           <button type="button" data-action="refresh"><i class="fas fa-sync-alt"></i> Refresh</button>
         </div>
         <div class="mkcm-browser-filter-row">
@@ -511,23 +543,49 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   buildBrokenLinkResultsHtml() {
-    if (this.browserState.loading) return '<div class="mkcm-loading"><i class="fas fa-spinner fa-spin"></i> Checking item compendium UUID links...</div>';
+    if (this.browserState.loading) return '<div class="mkcm-loading"><i class="fas fa-spinner fa-spin"></i> Checking item compendium UUID links in compendiums and world items...</div>';
     if (!this.browserState.linkResults?.length) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
 
-    return this.browserState.linkResults.map((link, index) => `
-      <div class="mkcm-result-row mkcm-broken-link-row" data-pack-id="${escapeHtml(link.packId)}" data-entry-id="${escapeHtml(link.documentId)}" data-document-name="${escapeHtml(link.documentName)}" data-link-index="${index}">
-        <img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" />
-        <div class="mkcm-result-main">
-          <div class="mkcm-result-title"><i class="fas fa-unlink"></i> ${escapeHtml(link.sourceName)}</div>
-          <div class="mkcm-result-meta">Broken: <code title="${escapeHtml(link.normalizedUuid)}">${escapeHtml(link.normalizedUuid)}</code></div>
-          <div class="mkcm-result-meta">Field: <code title="${escapeHtml(link.pathLabel)}">${escapeHtml(link.pathLabel)}</code> - ${escapeHtml(link.packTitle)}</div>
+    return this.browserState.linkResults.map((link, index) => {
+      const isWorldSource = link.sourceScope === "world";
+      const pack = isWorldSource ? null : resolvePack(link.packId);
+      const folderPath = isWorldSource ? (link.folderName ?? "") : (pack && link.folderId ? getFolderPathForBrowser(pack, link.folderId) : "");
+      const assignedActor = link.actorName ? `${link.actorName}${link.actorType ? ` (${link.actorType})` : ""}` : "None - standalone item";
+      const sourceKind = link.actorName ? (isWorldSource ? "World actor item" : "Embedded item") : (isWorldSource ? "World item" : "Compendium item");
+      const sourceGroupLabel = isWorldSource ? "Source" : "Pack";
+      const folderLabel = isWorldSource ? "World Folder" : "Pack Folder";
+      const openTitle = link.actorName ? "Open assigned actor" : "Open source item";
+
+      return `
+        <div class="mkcm-result-row mkcm-broken-link-row" data-source-scope="${escapeHtml(link.sourceScope ?? "compendium")}" data-pack-id="${escapeHtml(link.packId)}" data-entry-id="${escapeHtml(link.documentId)}" data-document-name="${escapeHtml(link.documentName)}" data-link-index="${index}">
+          <img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" />
+          <div class="mkcm-result-main">
+            <div class="mkcm-broken-link-header">
+              <div class="mkcm-broken-link-title"><i class="fas fa-unlink"></i> ${escapeHtml(link.itemName ?? link.sourceName)}</div>
+              <div class="mkcm-broken-link-badges">
+                <span class="mkcm-broken-link-badge">${escapeHtml(link.itemType ?? link.sourceType ?? "Item")}</span>
+                <span class="mkcm-broken-link-badge">${escapeHtml(sourceKind)}</span>
+              </div>
+            </div>
+            <div class="mkcm-broken-link-target">
+              <span>Missing target</span>
+              <code title="${escapeHtml(link.normalizedUuid)}">${escapeHtml(link.normalizedUuid)}</code>
+            </div>
+            <div class="mkcm-broken-link-details">
+              <div><span>Assigned Actor</span><strong title="${escapeHtml(link.actorUuid ?? "")}">${escapeHtml(assignedActor)}</strong></div>
+              <div><span>${sourceGroupLabel}</span><strong>${escapeHtml(link.packTitle)}</strong></div>
+              <div><span>${folderLabel}</span><strong>${escapeHtml(folderPath || "No folder")}</strong></div>
+              <div><span>Field</span><code title="${escapeHtml(link.pathLabel)}">${escapeHtml(link.pathLabel)}</code></div>
+              <div><span>Source UUID</span><code title="${escapeHtml(link.sourceUuid)}">${escapeHtml(link.sourceUuid)}</code></div>
+              <div><span>Reason</span><strong>${escapeHtml(link.reason ?? "Target document was not found.")}</strong></div>
+            </div>
+          </div>
+          <div class="mkcm-row-tools">
+            <button type="button" data-action="open-source" title="${escapeHtml(openTitle)}"><i class="fas fa-eye"></i></button>
+          </div>
         </div>
-        <div class="mkcm-row-tools">
-          <button type="button" data-action="open-source" title="Open source document"><i class="fas fa-eye"></i></button>
-          <button type="button" data-action="fix-broken-link" title="Replace or clear this broken compendium UUID"><i class="fas fa-wrench"></i></button>
-        </div>
-      </div>
-    `).join("");
+      `;
+    }).join("");
   }
 
   buildHtml() {
@@ -578,6 +636,26 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     } catch (err) {
       error("Failed to open compendium browser entry.", err);
     }
+  }
+
+  async openBrokenLinkSource(link) {
+    if (!link) return;
+
+    if (link.sourceScope === "world") {
+      const document = link.actorId
+        ? game.actors?.get?.(link.actorId)
+        : game.items?.get?.(link.documentId);
+
+      if (!document) {
+        warn("Broken link source document was not found.");
+        return;
+      }
+
+      document.sheet?.render?.(true);
+      return;
+    }
+
+    await this.openResultDocument(link.packId, link.documentId);
   }
 
   activateBrowserListeners(root) {
@@ -664,7 +742,13 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           }
           return;
         case "open-source":
-          await this.openResultDocument(pack, resultRow?.dataset?.entryId);
+          if (resultRow?.dataset?.linkIndex != null) {
+            const linkIndex = Number.parseInt(resultRow.dataset.linkIndex ?? "", 10);
+            const link = Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null;
+            await this.openBrokenLinkSource(link);
+          } else {
+            await this.openResultDocument(pack, resultRow?.dataset?.entryId);
+          }
           return;
         case "export-pack":
           return this.runSingleBrowserAction(`export-pack:${packId ?? ""}`, button, async () => {
@@ -673,17 +757,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           });
         case "import-pack":
           return this.runSingleBrowserAction(`import-pack:${packId ?? ""}`, button, async () => openImportDialog(pack));
-        case "fix-broken-link": {
-          const linkIndex = Number.parseInt(resultRow?.dataset?.linkIndex ?? "", 10);
-          const link = Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null;
-          if (!link) return;
-
-          return this.runSingleBrowserAction(`fix-link:${link.id}`, button, async () => {
-            const result = await openBrokenLinkFixDialog(link);
-            if (result) await this.runBrokenLinkCheck();
-            return result;
-          });
-        }
       }
     }, listenerOptions);
 
@@ -692,6 +765,13 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       if (row) {
         event.preventDefault();
         event.stopPropagation();
+
+        if (row.dataset.linkIndex != null) {
+          const linkIndex = Number.parseInt(row.dataset.linkIndex ?? "", 10);
+          const link = Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null;
+          await this.openBrokenLinkSource(link);
+          return;
+        }
 
         const pack = resolvePack(row.dataset.packId);
         const entryId = row.dataset.entryId;

@@ -1,5 +1,5 @@
 export const MODULE_ID = "mk-compendiums";
-export const MODULE_VERSION = "1.3.0";
+export const MODULE_VERSION = "1.3.1";
 export const EXPORT_SCHEMA = "mk-compendiums.v1";
 export const DEFAULT_BATCH_SIZE = 100;
 export const BROWSER_UI_DEFAULTS_VERSION = "1.1.17";

@@ -2,9 +2,13 @@
 
 ## Unreleased
 
-- Added a GM-only browser action to check matching Item compendiums for broken compendium UUID links.
-- Added a fix dialog that can replace a broken compendium UUID with a resolvable target or clear the broken link from the source item.
-- Exposed broken-link checking and fixing helpers through the module API.
+## 1.3.1
+
+- Added a GM-only browser action to check item data in matching Item and Actor compendiums, world Items, and world Actor inventories for broken compendium UUID links.
+- Added richer broken-link result rows with item type, source/folder, source UUID, missing target, and assigned actor details when available.
+- Ignored provenance metadata such as Scene Packer source IDs so imported-origin UUIDs are not treated as broken item relations.
+- Kept the browser broken-link audit display-only, with result rows opening the source document for review.
+- Exposed broken-link checking and lower-level fixing helpers through the module API.
 
 ## 1.3.0
 
