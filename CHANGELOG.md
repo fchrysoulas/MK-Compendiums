@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3.0
+
+- Added Foundry VTT v14 compatibility metadata while keeping support for v12 and v13.
+
 ## 1.2.0
 
 - Hardened import reference rewriting so exact IDs and Foundry-style references are remapped without rewriting arbitrary prose.

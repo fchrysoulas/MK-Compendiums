@@ -4,7 +4,7 @@ A small, system-agnostic Foundry VTT module for browsing, searching, exporting, 
 
 ## Features
 
-- Supports Foundry VTT v12 and v13 with one module package.
+- Supports Foundry VTT v12, v13, and v14 with one module package.
 - Opens the **MK Compendium Browser** from the left scene controls toolbar.
 - Makes the browser available to players and GMs.
 - Keeps import/export tools GM-only.
