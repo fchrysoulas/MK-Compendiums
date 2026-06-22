@@ -27,16 +27,14 @@ export function injectStyles() {
       min-height: 0;
     }
 
-    .mkcm-browser-filters,
-    .mkcm-browser-tools {
+    .mkcm-browser-filters {
       flex: 0 0 auto;
       padding: 8px;
       border-bottom: 1px solid var(--color-border-light-tertiary, rgba(0,0,0,0.25));
     }
 
     .mkcm-browser-search-row,
-    .mkcm-browser-filter-row,
-    .mkcm-browser-tools-buttons {
+    .mkcm-browser-filter-row {
       display: flex;
       gap: 6px;
       align-items: center;
@@ -65,11 +63,6 @@ export function injectStyles() {
       gap: 2px;
       flex: 1 1 150px;
       font-size: 12px;
-    }
-
-    .mkcm-browser-tools-note {
-      margin-bottom: 6px;
-      opacity: 0.9;
     }
 
     .mkcm-browser-body {

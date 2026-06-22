@@ -292,15 +292,17 @@ async function confirmReloadCurrentClient() {
   let confirmed = false;
 
   try {
-    if (typeof Dialog?.confirm === "function") {
-      confirmed = await Dialog.confirm({
+    const DialogClass = globalThis.Dialog;
+
+    if (typeof DialogClass?.confirm === "function") {
+      confirmed = await DialogClass.confirm({
         title,
         content,
         yes: () => true,
         no: () => false,
         defaultYes: true
       });
-    } else if (typeof Dialog === "function") {
+    } else if (typeof DialogClass === "function") {
       confirmed = await new Promise(resolve => {
         let settled = false;
         const resolveOnce = value => {
@@ -309,7 +311,7 @@ async function confirmReloadCurrentClient() {
           resolve(value);
         };
 
-        new Dialog({
+        new DialogClass({
           title,
           content,
           buttons: {

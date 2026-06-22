@@ -272,34 +272,111 @@ export function buildDocumentIdMap(entries, { preserveIds = true } = {}) {
   return idMap;
 }
 
-export function rewriteStringReferences(value, idMap) {
-  let next = value;
+const REFERENCE_KEY_TOKENS = new Set([
+  "_id",
+  "id",
+  "ids",
+  "uuid",
+  "uuids",
+  "ref",
+  "refs",
+  "reference",
+  "references",
+  "origin",
+  "sourceid",
+  "link",
+  "links",
+  "target",
+  "targets"
+]);
+
+const REFERENCE_TEXT_MARKERS = [
+  "@UUID[",
+  "@Compendium[",
+  "Compendium.",
+  "Actor.",
+  "Adventure.",
+  "Cards.",
+  "ChatMessage.",
+  "Combat.",
+  "Item.",
+  "JournalEntry.",
+  "Macro.",
+  "Playlist.",
+  "RollTable.",
+  "Scene."
+];
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getKeyTokens(key) {
+  const text = String(key ?? "");
+  const exactTokens = text === "_id" ? ["_id"] : [];
+
+  return [
+    ...exactTokens,
+    ...text
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+      .replace(/_/g, " ")
+      .toLowerCase()
+      .split(/[^a-z0-9_]+/)
+      .filter(Boolean)
+  ];
+}
+
+function hasReferenceKey(key, parentKey = "") {
+  return [...getKeyTokens(key), ...getKeyTokens(parentKey)].some(token => REFERENCE_KEY_TOKENS.has(token));
+}
+
+function hasReferenceMarker(value) {
+  const text = String(value ?? "");
+  return REFERENCE_TEXT_MARKERS.some(marker => text.includes(marker));
+}
+
+function replaceBoundedIdToken(value, oldId, newId) {
+  const pattern = new RegExp(`(^|[^A-Za-z0-9_-])${escapeRegExp(oldId)}(?=$|[^A-Za-z0-9_-])`, "g");
+  return value.replace(pattern, (_match, prefix) => `${prefix}${newId}`);
+}
+
+export function rewriteStringReferences(value, idMap, { key = "", parentKey = "", isObjectKey = false } = {}) {
+  let next = String(value ?? "");
+
+  if (!idMap?.size) return next;
+
+  const exactMatch = idMap.get(next);
+  if (exactMatch) return exactMatch;
+
+  if (!hasReferenceMarker(next) && !hasReferenceKey(key, parentKey) && !(isObjectKey && hasReferenceMarker(next))) {
+    return next;
+  }
 
   for (const [oldId, newId] of idMap.entries()) {
     if (!oldId || !newId || oldId === newId) continue;
-    next = next.replaceAll(oldId, newId);
+    next = replaceBoundedIdToken(next, oldId, newId);
   }
 
   return next;
 }
 
-export function rewriteValueReferences(value, idMap) {
+export function rewriteValueReferences(value, idMap, key = "", parentKey = "") {
   if (!idMap?.size) return value;
 
   if (typeof value === "string") {
-    return idMap.get(value) ?? rewriteStringReferences(value, idMap);
+    return rewriteStringReferences(value, idMap, { key, parentKey });
   }
 
   if (Array.isArray(value)) {
-    return value.map(item => rewriteValueReferences(item, idMap));
+    return value.map(item => rewriteValueReferences(item, idMap, key, parentKey));
   }
 
   if (value && typeof value === "object") {
     const rewritten = {};
 
-    for (const [key, child] of Object.entries(value)) {
-      const rewrittenKey = idMap.get(key) ?? rewriteStringReferences(key, idMap);
-      rewritten[rewrittenKey] = rewriteValueReferences(child, idMap);
+    for (const [childKey, child] of Object.entries(value)) {
+      const rewrittenKey = rewriteStringReferences(childKey, idMap, { key: childKey, parentKey: key, isObjectKey: true });
+      rewritten[rewrittenKey] = rewriteValueReferences(child, idMap, childKey, key);
     }
 
     return rewritten;

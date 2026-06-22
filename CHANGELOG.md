@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Hardened import reference rewriting so exact IDs and Foundry-style references are remapped without rewriting arbitrary prose.
+- Escaped pack and folder names in import confirmation dialog HTML.
+- Standardized exporter, importer, and settings dialog checks on `globalThis.Dialog` fallbacks.
+- Made browser search tolerate individual pack indexing failures while keeping results from other packs.
+- Removed unused selected-pack browser toolbar code and styles.
+- Added Node-based utility tests for import payload normalization, reference rewriting, folder queue ordering, folder target remapping, pack matching, and module version consistency.
+- Added Foundry deployment metadata to `module.json`, including project, manifest, stable download, readme, changelog, and issue URLs.
+- Added a PowerShell release packaging script that creates Foundry-ready GitHub release assets under `dist/`.
+
 ## 1.1.27
 
 - Converted the MK Compendium Browser to extend Foundry `ApplicationV2` directly in both v12 and v13.

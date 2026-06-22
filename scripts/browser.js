@@ -62,11 +62,11 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     };
     this.indexCache = new Map();
     this.descriptionSearchCache = new Map();
-    this._searchTimeout = null;
     this._searchRequest = 0;
     this._sidebarScrollTop = 0;
     this._listenerController = null;
     this._busyActions = new Set();
+    this._searchFailurePacks = new Set();
   }
 
   /**
@@ -133,10 +133,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     return getExportablePacks();
   }
 
-  get selectedPack() {
-    return this.browserState.packId ? resolvePack(this.browserState.packId) : null;
-  }
-
   get packMetas() {
     return this.packs.map(getBrowserPackMeta);
   }
@@ -163,8 +159,23 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     return Array.from(types).sort();
   }
 
+  getPackCacheKey(pack) {
+    return pack?.collection ?? pack?.metadata?.id ?? pack?.metadata?.name ?? "";
+  }
+
+  notePackSearchFailure(pack, err) {
+    const packKey = this.getPackCacheKey(pack) || getPackTitle(pack);
+
+    if (!this._searchFailurePacks.has(packKey)) {
+      this._searchFailurePacks.add(packKey);
+      warn(`Could not search compendium "${getPackTitle(pack)}". Check the console for details.`);
+    }
+
+    console.warn(err);
+  }
+
   async getIndexForPack(pack, { force = false } = {}) {
-    const packId = pack.collection ?? pack.metadata?.id ?? pack.metadata?.name;
+    const packId = this.getPackCacheKey(pack);
     if (!packId) return [];
     if (force) this.indexCache.delete(packId);
     if (!this.indexCache.has(packId)) this.indexCache.set(packId, await getBrowserPackIndex(pack, { force }));
@@ -173,7 +184,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
 
   async getDescriptionSearchIndexForPack(pack, { force = false } = {}) {
-    const packId = pack.collection ?? pack.metadata?.id ?? pack.metadata?.name;
+    const packId = this.getPackCacheKey(pack);
     if (!packId) return new Map();
     if (force) this.descriptionSearchCache.delete(packId);
 
@@ -217,25 +228,33 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     try {
       const query = (this.browserState.query ?? "").toLocaleLowerCase();
       const results = [];
+      let failedPacks = 0;
 
       for (const pack of this.getCandidatePacks()) {
-        const entries = await this.getIndexForPack(pack, { force });
-        const descriptionSearchIndex = query ? await this.getDescriptionSearchIndexForPack(pack, { force }) : null;
-        const folderFilter = this.browserState.packId && this.browserState.folderId ? collectPackFolderTree(pack, this.browserState.folderId) : null;
+        try {
+          const entries = await this.getIndexForPack(pack, { force });
+          const descriptionSearchIndex = query ? await this.getDescriptionSearchIndexForPack(pack, { force }) : null;
+          const folderFilter = this.browserState.packId && this.browserState.folderId ? collectPackFolderTree(pack, this.browserState.folderId) : null;
 
-        for (const entry of entries) {
-          if (this.browserState.entryType && entry.type !== this.browserState.entryType) continue;
-          if (folderFilter && !folderFilter.has(normalizeFolderReference(entry.folder))) continue;
-          if (query) {
-            const haystack = `${entry.name} ${entry.type} ${entry.packTitle} ${entry.packageName} ${getFolderPathForBrowser(pack, entry.folder)}`.toLocaleLowerCase();
-            const descriptionHaystack = descriptionSearchIndex?.get(entry.id) ?? "";
-            if (!haystack.includes(query) && !descriptionHaystack.includes(query)) continue;
+          this._searchFailurePacks.delete(this.getPackCacheKey(pack));
+
+          for (const entry of entries) {
+            if (this.browserState.entryType && entry.type !== this.browserState.entryType) continue;
+            if (folderFilter && !folderFilter.has(normalizeFolderReference(entry.folder))) continue;
+            if (query) {
+              const haystack = `${entry.name} ${entry.type} ${entry.packTitle} ${entry.packageName} ${getFolderPathForBrowser(pack, entry.folder)}`.toLocaleLowerCase();
+              const descriptionHaystack = descriptionSearchIndex?.get(entry.id) ?? "";
+              if (!haystack.includes(query) && !descriptionHaystack.includes(query)) continue;
+            }
+
+            results.push({
+              ...entry,
+              folderPath: getFolderPathForBrowser(pack, entry.folder)
+            });
           }
-
-          results.push({
-            ...entry,
-            folderPath: getFolderPathForBrowser(pack, entry.folder)
-          });
+        } catch (err) {
+          failedPacks += 1;
+          this.notePackSearchFailure(pack, err);
         }
       }
 
@@ -243,7 +262,11 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
       results.sort((a, b) => a.name.localeCompare(b.name) || a.packTitle.localeCompare(b.packTitle));
       this.browserState.results = results;
-      this.browserState.message = results.length ? `${results.length} result(s).` : "No matching compendium entries found.";
+      this.browserState.message = results.length
+        ? `${results.length} result(s).${failedPacks ? ` ${failedPacks} pack(s) could not be searched.` : ""}`
+        : failedPacks
+          ? `No matching compendium entries found. ${failedPacks} pack(s) could not be searched.`
+          : "No matching compendium entries found.";
     } catch (err) {
       if (requestId !== this._searchRequest) return;
       this.browserState.results = [];
@@ -288,6 +311,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   async refreshBrowser() {
     this.indexCache.clear();
     this.descriptionSearchCache.clear();
+    this._searchFailurePacks.clear();
     this._sidebarScrollTop = 0;
     this.resetFiltersAndResults();
     await this.runSearch({ force: true });
@@ -402,27 +426,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         </div>
       </div>
     `).join("");
-  }
-
-  buildSelectedToolsHtml() {
-    const pack = this.selectedPack;
-    if (!pack) {
-      return `
-        <div class="mkcm-browser-tools-note">
-          Select a pack to enable pack import/export tools.
-        </div>
-      `;
-    }
-
-    return `
-      <div class="mkcm-browser-tools-note">
-        <strong>${escapeHtml(getPackTitle(pack))}</strong>
-      </div>
-      <div class="mkcm-browser-tools-buttons">
-        <button type="button" data-action="export-selected-pack"><i class="fas fa-file-export"></i> Export Pack</button>
-        <button type="button" data-action="import-selected-pack"><i class="fas fa-file-import"></i> Import Pack</button>
-      </div>
-    `;
   }
 
   buildHtml() {
@@ -545,13 +548,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           });
         case "import-pack":
           return this.runSingleBrowserAction(`import-pack:${packId ?? ""}`, button, async () => openImportDialog(pack));
-        case "export-selected-pack":
-          return this.runSingleBrowserAction(`export-pack:${this.selectedPack?.collection ?? "selected"}`, button, async () => {
-            if (this.selectedPack && await confirmExportAction({ title: "Export Compendium Pack", message: `Export "${getPackTitle(this.selectedPack)}" to JSON?` })) return exportPackToJson(this.selectedPack);
-            return null;
-          });
-        case "import-selected-pack":
-          return this.runSingleBrowserAction(`import-pack:${this.selectedPack?.collection ?? "selected"}`, button, async () => openImportDialog(this.selectedPack));
       }
     }, listenerOptions);
 

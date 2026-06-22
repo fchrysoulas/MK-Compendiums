@@ -108,7 +108,8 @@ export async function getPackExportBlock(pack) {
 }
 
 export async function confirmExportAction({ title = "Confirm Export", message = "Export this compendium data to JSON?" } = {}) {
-  if (!globalThis.Dialog) return window.confirm(message);
+  const DialogClass = globalThis.Dialog;
+  if (!DialogClass) return window.confirm(message);
 
   return new Promise(resolve => {
     let settled = false;
@@ -118,7 +119,7 @@ export async function confirmExportAction({ title = "Confirm Export", message = 
       resolve(value);
     };
 
-    new Dialog({
+    new DialogClass({
       title,
       content: `<p>${escapeHtml(message)}</p>`,
       buttons: {

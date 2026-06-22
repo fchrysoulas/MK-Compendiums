@@ -321,8 +321,9 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
 }
 
 export function getImportDialogContent(pack, { targetFolder = null } = {}) {
+  const targetPackName = escapeHtml(pack.title ?? pack.collection);
   const folderNote = targetFolder
-    ? `<p><strong>Target folder:</strong> ${getFolderName(targetFolder)}</p>`
+    ? `<p><strong>Target folder:</strong> ${escapeHtml(getFolderName(targetFolder))}</p>`
     : "";
   const replaceOption = targetFolder
     ? ""
@@ -333,7 +334,7 @@ export function getImportDialogContent(pack, { targetFolder = null } = {}) {
 
   return `
     <form class="mk-compendiums-import-form">
-      <p><strong>Target pack:</strong> ${pack.title ?? pack.collection}</p>
+      <p><strong>Target pack:</strong> ${targetPackName}</p>
       ${folderNote}
       <div class="form-group">
         <label>JSON File</label>
@@ -369,9 +370,10 @@ export function getImportDialogContent(pack, { targetFolder = null } = {}) {
 }
 
 export async function confirmImportAction({ title = "Confirm Import", content = "<p>Import this JSON into the selected compendium?</p>" } = {}) {
-  if (typeof Dialog?.confirm !== "function") return window.confirm("Import this JSON into the selected compendium?");
+  const DialogClass = globalThis.Dialog;
+  if (typeof DialogClass?.confirm !== "function") return window.confirm("Import this JSON into the selected compendium?");
 
-  return Dialog.confirm({
+  return DialogClass.confirm({
     title,
     content,
     yes: () => true,
@@ -381,12 +383,15 @@ export async function confirmImportAction({ title = "Confirm Import", content = 
 }
 
 export async function confirmReplacePack(pack) {
-  if (typeof Dialog?.confirm !== "function") return window.confirm(`Replace all entries in ${pack.title}?`);
+  const DialogClass = globalThis.Dialog;
+  const packName = escapeHtml(pack.title ?? pack.collection);
 
-  return Dialog.confirm({
+  if (typeof DialogClass?.confirm !== "function") return window.confirm(`Replace all entries in ${pack.title ?? pack.collection}?`);
+
+  return DialogClass.confirm({
     title: "Replace Compendium Pack?",
     content: `
-      <p>This will delete all existing documents in <strong>${pack.title ?? pack.collection}</strong>, then import the selected JSON.</p>
+      <p>This will delete all existing documents in <strong>${packName}</strong>, then import the selected JSON.</p>
       <p>This cannot be undone unless you have another backup.</p>
     `,
     yes: () => true,
@@ -414,8 +419,14 @@ export async function openImportDialog(packIdOrPack, { targetFolderId = null } =
     return null;
   }
 
+  const DialogClass = globalThis.Dialog;
+  if (!DialogClass) {
+    warn("The Foundry dialog API is not available.");
+    return null;
+  }
+
   return new Promise(resolve => {
-    new Dialog({
+    new DialogClass({
       title: targetFolder ? `Import JSON into folder ${getFolderName(targetFolder)}` : `Import JSON into ${pack.title ?? pack.collection}`,
       content: getImportDialogContent(pack, { targetFolder }),
       buttons: {
@@ -536,9 +547,11 @@ export async function createWorldCompendiumForExportBlock(packExport, targetFold
 }
 
 export function getDirectoryImportDialogContent(folder) {
+  const folderName = escapeHtml(getFolderName(folder));
+
   return `
     <form class="mk-compendiums-directory-import-form">
-      <p><strong>Target compendium folder:</strong> ${getFolderName(folder)}</p>
+      <p><strong>Target compendium folder:</strong> ${folderName}</p>
       <div class="form-group">
         <label>JSON File</label>
         <input type="file" name="jsonFile" accept="application/json,.json" required />
@@ -579,12 +592,15 @@ export function getDirectoryImportDialogContent(folder) {
 }
 
 export async function confirmReplaceDirectoryPacks(folder, packCount) {
-  if (typeof Dialog?.confirm !== "function") return window.confirm(`Replace entries in ${packCount} matching pack(s) under ${getFolderName(folder)}?`);
+  const DialogClass = globalThis.Dialog;
+  const folderName = escapeHtml(getFolderName(folder));
 
-  return Dialog.confirm({
+  if (typeof DialogClass?.confirm !== "function") return window.confirm(`Replace entries in ${packCount} matching pack(s) under ${getFolderName(folder)}?`);
+
+  return DialogClass.confirm({
     title: "Replace Matching Compendium Packs?",
     content: `
-      <p>This will delete existing documents from <strong>${packCount}</strong> matching pack(s) under <strong>${getFolderName(folder)}</strong>, then import the selected JSON.</p>
+      <p>This will delete existing documents from <strong>${packCount}</strong> matching pack(s) under <strong>${folderName}</strong>, then import the selected JSON.</p>
       <p>This cannot be undone unless you have another backup.</p>
     `,
     yes: () => true,
@@ -685,9 +701,14 @@ export async function openCompendiumDirectoryFolderImportDialog(element) {
   }
 
   const folder = getDirectoryFolderDataFromElement(element);
+  const DialogClass = globalThis.Dialog;
+  if (!DialogClass) {
+    warn("The Foundry dialog API is not available.");
+    return null;
+  }
 
   return new Promise(resolve => {
-    new Dialog({
+    new DialogClass({
       title: `Import JSON into compendium folder ${getFolderName(folder)}`,
       content: getDirectoryImportDialogContent(folder),
       buttons: {
