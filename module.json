@@ -1,0 +1,19 @@
+{
+  "id": "mk-compendiums",
+  "title": "MK-Compendiums",
+  "description": "Browse and search compendiums for all users, with GM-only tools to export and import packs, folders, or Compendium Directory folders as JSON.",
+  "version": "1.1.27",
+  "compatibility": {
+    "minimum": "12",
+    "verified": "13",
+    "maximum": "13"
+  },
+  "authors": [
+    {
+      "name": "Mikrokouneli"
+    }
+  ],
+  "esmodules": [
+    "scripts/main.js"
+  ]
+}
