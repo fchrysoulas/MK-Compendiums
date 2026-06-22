@@ -16,6 +16,11 @@ import {
   openCompendiumDirectoryFolderImportDialog,
   openImportDialog
 } from './importer.js';
+import {
+  applyBrokenLinkFix,
+  findBrokenLinksInPacks,
+  openBrokenLinkFixDialog
+} from './link-checker.js';
 
 Hooks.once("init", () => {
   log("Initializing");
@@ -38,6 +43,9 @@ Hooks.once("init", () => {
       createWorldCompendiumForExportBlock,
       openImportDialog,
       openCompendiumDirectoryFolderImportDialog,
+      findBrokenLinksInPacks,
+      applyBrokenLinkFix,
+      openBrokenLinkFixDialog,
       openCompendiumBrowser,
       applyBrowserUiSettingsToDocument
     };

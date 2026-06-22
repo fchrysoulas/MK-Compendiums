@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added a GM-only browser action to check matching Item compendiums for broken compendium UUID links.
+- Added a fix dialog that can replace a broken compendium UUID with a resolvable target or clear the broken link from the source item.
+- Exposed broken-link checking and fixing helpers through the module API.
+
 ## 1.3.0
 
 - Added Foundry VTT v14 compatibility metadata while keeping support for v12 and v13.

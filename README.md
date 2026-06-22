@@ -15,6 +15,8 @@ A small, system-agnostic Foundry VTT module for browsing, searching, exporting, 
 - Filters browser results by document type, entry type, package, and pack.
 - Opens compendium entries directly from browser results with double-click.
 - Opens a compendium pack from the browser with the View button.
+- Checks matching Item compendiums for broken compendium UUID links from the browser.
+- Lets GMs replace or clear compendium UUID links found inside Item data when the target does not exist in a compendium.
 - Supports dragging browser result rows with compendium UUID drag data.
 - Preserves the browser sidebar scroll position while selecting folders inside a pack.
 - Provides a Refresh button that clears filters, clears index caches, and reloads compendium indexes.
@@ -97,6 +99,11 @@ game.modules.get("mk-compendiums").api.openImportDialog("world.your-pack-name");
 game.modules.get("mk-compendiums").api.openImportDialog("world.your-pack-name", {
   targetFolderId: "folderIdHere"
 });
+```
+
+```js
+const pack = game.packs.get("world.your-pack-name");
+const brokenLinks = await game.modules.get("mk-compendiums").api.findBrokenLinksInPacks([pack]);
 ```
 
 ```js

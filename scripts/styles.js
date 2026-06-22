@@ -260,6 +260,18 @@ export function injectStyles() {
       min-width: 0;
     }
 
+    .mkcm-broken-link-row .mkcm-result-meta code {
+      display: inline-block;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      vertical-align: bottom;
+    }
+
+    .mkcm-broken-link-form code {
+      user-select: text;
+    }
+
     .mkcm-empty,
     .mkcm-loading {
       padding: 12px;

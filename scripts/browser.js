@@ -19,6 +19,7 @@ import {
 } from './utils.js';
 import { confirmExportAction, exportPackToJson } from './exporter.js';
 import { openImportDialog } from './importer.js';
+import { findBrokenLinksInPacks, openBrokenLinkFixDialog } from './link-checker.js';
 import { MODULE_VERSION } from './constants.js';
 
 const BROWSER_WINDOW_TITLE = `MK Compendium Browser v${MODULE_VERSION}`;
@@ -56,6 +57,8 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       packId: options.packId ?? "",
       folderId: options.folderId ?? "",
       results: [],
+      linkAuditActive: false,
+      linkResults: [],
       searched: false,
       loading: false,
       message: "Select a pack to browse, or search across all compendiums."
@@ -75,6 +78,10 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
    */
   get browserState() {
     return this._browserState;
+  }
+
+  get canManageCompendiums() {
+    return game.user?.isGM === true;
   }
 
   get title() {
@@ -220,8 +227,14 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     return packs;
   }
 
+  getCandidateItemPacks() {
+    return this.getCandidatePacks().filter(pack => (pack.documentName ?? pack.metadata?.type) === "Item");
+  }
+
   async runSearch({ render = true, force = false } = {}) {
     const requestId = ++this._searchRequest;
+    this.browserState.linkAuditActive = false;
+    this.browserState.linkResults = [];
     this.browserState.loading = true;
     this.browserState.searched = true;
 
@@ -303,6 +316,8 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     this.browserState.packId = "";
     this.browserState.folderId = "";
     this.browserState.results = [];
+    this.browserState.linkAuditActive = false;
+    this.browserState.linkResults = [];
     this.browserState.searched = false;
     this.browserState.loading = false;
     this.browserState.message = "Select a pack to browse, or search across all compendiums.";
@@ -317,6 +332,73 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     await this.runSearch({ force: true });
   }
 
+  async runBrokenLinkCheck({ render = true } = {}) {
+    if (!this.canManageCompendiums) {
+      warn("Only the GM can check and fix compendium links.");
+      return;
+    }
+
+    const requestId = ++this._searchRequest;
+    const packs = this.getCandidateItemPacks();
+    const folderFilters = new Map();
+
+    if (this.browserState.packId && this.browserState.folderId) {
+      for (const pack of packs) {
+        folderFilters.set(this.getPackCacheKey(pack), collectPackFolderTree(pack, this.browserState.folderId));
+      }
+    }
+
+    this.browserState.linkAuditActive = true;
+    this.browserState.linkResults = [];
+    this.browserState.results = [];
+    this.browserState.loading = true;
+    this.browserState.searched = true;
+    this.browserState.message = packs.length
+      ? `Checking compendium UUID links in ${packs.length} item pack(s)...`
+      : "No matching item compendium packs to check.";
+
+    if (render) this.render(true);
+
+    if (!packs.length) {
+      this.browserState.loading = false;
+      if (render) this.render(true);
+      return;
+    }
+
+    try {
+      let failedPacks = 0;
+      const linkResults = await findBrokenLinksInPacks(packs, {
+        shouldScanDocument: (_document, source, pack) => {
+          const folderFilter = folderFilters.get(this.getPackCacheKey(pack));
+          if (!folderFilter) return true;
+          return folderFilter.has(normalizeFolderReference(source?.folder));
+        },
+        onPackScanned: (_pack, result) => {
+          if (result?.failed) failedPacks += 1;
+        }
+      });
+
+      if (requestId !== this._searchRequest) return;
+
+      this.browserState.linkResults = linkResults;
+      this.browserState.message = linkResults.length
+        ? `${linkResults.length} broken item compendium UUID link(s) found.${failedPacks ? ` ${failedPacks} pack(s) could not be checked.` : ""}`
+        : failedPacks
+          ? `No broken item compendium UUID links found. ${failedPacks} pack(s) could not be checked.`
+          : "No broken item compendium UUID links found.";
+    } catch (err) {
+      if (requestId !== this._searchRequest) return;
+      this.browserState.linkResults = [];
+      this.browserState.message = "Broken link check failed. Check the console for details.";
+      error("Broken item compendium link check failed.", err);
+    } finally {
+      if (requestId === this._searchRequest) {
+        this.browserState.loading = false;
+        if (render) this.render(true);
+      }
+    }
+  }
+
   buildFiltersHtml() {
     const documentOptions = this.documentNames.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.documentName === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
     const packageOptions = this.packageNames.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.packageName === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
@@ -328,6 +410,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         <div class="mkcm-browser-search-row">
           <input type="search" name="query" value="${escapeHtml(this.browserState.query)}" placeholder="Search names, descriptions, packs, folders..." autocomplete="off" />
           <button type="button" data-action="search"><i class="fas fa-search"></i> Search</button>
+          ${this.canManageCompendiums ? '<button type="button" data-action="check-links" title="Check matching item compendiums for broken compendium UUID links"><i class="fas fa-unlink"></i> Check Links</button>' : ""}
           <button type="button" data-action="refresh"><i class="fas fa-sync-alt"></i> Refresh</button>
         </div>
         <div class="mkcm-browser-filter-row">
@@ -388,8 +471,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     const packs = this.filteredPackMetas;
     if (!packs.length) return '<div class="mkcm-empty">No matching compendium packs.</div>';
 
-    const canManageCompendiums = game.user?.isGM ?? false;
-
     return packs.map(pack => `
       <div class="mkcm-pack-block ${this.browserState.packId === pack.id ? "active" : ""}" data-pack-id="${escapeHtml(pack.id)}">
         <div class="mkcm-pack-row ${this.browserState.packId === pack.id && !this.browserState.folderId ? "active" : ""}">
@@ -399,7 +480,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           </button>
           <div class="mkcm-row-tools">
             <button type="button" data-action="view-pack" title="Open this compendium"><i class="fas fa-eye"></i></button>
-            ${canManageCompendiums ? `
+            ${this.canManageCompendiums ? `
               <button type="button" data-action="export-pack" title="Export this pack"><i class="fas fa-file-export"></i></button>
               <button type="button" data-action="import-pack" title="Import JSON into this pack"><i class="fas fa-file-import"></i></button>
             ` : ""}
@@ -411,6 +492,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   buildResultsHtml() {
+    if (this.browserState.linkAuditActive && this.canManageCompendiums) return this.buildBrokenLinkResultsHtml();
     if (this.browserState.loading) return '<div class="mkcm-loading"><i class="fas fa-spinner fa-spin"></i> Loading compendium indexes...</div>';
     if (!this.browserState.searched) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
     if (!this.browserState.results.length) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
@@ -423,6 +505,26 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           <div class="mkcm-result-meta">
             ${escapeHtml(entry.type)} · ${escapeHtml(entry.packTitle)}${entry.folderPath ? ` · ${escapeHtml(entry.folderPath)}` : ""}
           </div>
+        </div>
+      </div>
+    `).join("");
+  }
+
+  buildBrokenLinkResultsHtml() {
+    if (this.browserState.loading) return '<div class="mkcm-loading"><i class="fas fa-spinner fa-spin"></i> Checking item compendium UUID links...</div>';
+    if (!this.browserState.linkResults?.length) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
+
+    return this.browserState.linkResults.map((link, index) => `
+      <div class="mkcm-result-row mkcm-broken-link-row" data-pack-id="${escapeHtml(link.packId)}" data-entry-id="${escapeHtml(link.documentId)}" data-document-name="${escapeHtml(link.documentName)}" data-link-index="${index}">
+        <img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" />
+        <div class="mkcm-result-main">
+          <div class="mkcm-result-title"><i class="fas fa-unlink"></i> ${escapeHtml(link.sourceName)}</div>
+          <div class="mkcm-result-meta">Broken: <code title="${escapeHtml(link.normalizedUuid)}">${escapeHtml(link.normalizedUuid)}</code></div>
+          <div class="mkcm-result-meta">Field: <code title="${escapeHtml(link.pathLabel)}">${escapeHtml(link.pathLabel)}</code> - ${escapeHtml(link.packTitle)}</div>
+        </div>
+        <div class="mkcm-row-tools">
+          <button type="button" data-action="open-source" title="Open source document"><i class="fas fa-eye"></i></button>
+          <button type="button" data-action="fix-broken-link" title="Replace or clear this broken compendium UUID"><i class="fas fa-wrench"></i></button>
         </div>
       </div>
     `).join("");
@@ -441,7 +543,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           </aside>
           <main class="mkcm-browser-results">
             <div class="mkcm-results-header">
-              <strong>Results</strong>
+              <strong>${this.browserState.linkAuditActive && this.canManageCompendiums ? "Broken Links" : "Results"}</strong>
               <span>${escapeHtml(this.browserState.message)}</span>
             </div>
             <div class="mkcm-results-list">${this.buildResultsHtml()}</div>
@@ -466,6 +568,18 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     }
   }
 
+  async openResultDocument(packIdOrPack, entryId) {
+    const pack = resolvePack(packIdOrPack);
+    if (!pack || !entryId) return;
+
+    try {
+      const doc = await pack.getDocument(entryId);
+      doc?.sheet?.render?.(true);
+    } catch (err) {
+      error("Failed to open compendium browser entry.", err);
+    }
+  }
+
   activateBrowserListeners(root) {
     if (!root) return;
 
@@ -485,6 +599,14 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       event.preventDefault();
       await this.refreshBrowser();
     }, listenerOptions);
+
+    if (this.canManageCompendiums) {
+      root.querySelector('[data-action="check-links"]')?.addEventListener("click", async event => {
+        event.preventDefault();
+        readBrowserStateFromForm(root, this.browserState);
+        await this.runBrokenLinkCheck();
+      }, listenerOptions);
+    }
 
     root.querySelector('[name="query"]')?.addEventListener("keydown", async event => {
       if (event.key !== "Enter") return;
@@ -507,7 +629,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       if (!button) return;
       const action = button.dataset.action;
 
-      if (["search", "refresh"].includes(action)) return;
+      if (["search", "refresh", "check-links"].includes(action)) return;
 
       event.preventDefault();
       event.stopPropagation();
@@ -541,6 +663,9 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
             error("Failed to open compendium browser pack.", err);
           }
           return;
+        case "open-source":
+          await this.openResultDocument(pack, resultRow?.dataset?.entryId);
+          return;
         case "export-pack":
           return this.runSingleBrowserAction(`export-pack:${packId ?? ""}`, button, async () => {
             if (pack && await confirmExportAction({ title: "Export Compendium Pack", message: `Export "${getPackTitle(pack)}" to JSON?` })) return exportPackToJson(pack);
@@ -548,6 +673,17 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           });
         case "import-pack":
           return this.runSingleBrowserAction(`import-pack:${packId ?? ""}`, button, async () => openImportDialog(pack));
+        case "fix-broken-link": {
+          const linkIndex = Number.parseInt(resultRow?.dataset?.linkIndex ?? "", 10);
+          const link = Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null;
+          if (!link) return;
+
+          return this.runSingleBrowserAction(`fix-link:${link.id}`, button, async () => {
+            const result = await openBrokenLinkFixDialog(link);
+            if (result) await this.runBrokenLinkCheck();
+            return result;
+          });
+        }
       }
     }, listenerOptions);
 
@@ -561,18 +697,13 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         const entryId = row.dataset.entryId;
         if (!pack || !entryId) return;
 
-        try {
-          const doc = await pack.getDocument(entryId);
-          doc?.sheet?.render?.(true);
-        } catch (err) {
-          error("Failed to open compendium browser entry.", err);
-        }
+        await this.openResultDocument(pack, entryId);
         return;
       }
     }, listenerOptions);
 
     root.addEventListener("dragstart", event => {
-      const row = event.target?.closest?.(".mkcm-result-row");
+      const row = event.target?.closest?.('.mkcm-result-row[draggable="true"]');
       if (!row) return;
       const pack = resolvePack(row.dataset.packId);
       const entryId = row.dataset.entryId;
