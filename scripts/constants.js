@@ -1,8 +1,6 @@
 export const MODULE_ID = "mk-compendiums";
-export const MODULE_VERSION = "1.1.27";
+export const MODULE_VERSION = "1.2.0";
 export const EXPORT_SCHEMA = "mk-compendiums.v1";
-export const LEGACY_EXPORT_SCHEMA = "compendium-manager.v1";
-export const OLDER_EXPORT_SCHEMA = "mk-compendium-exporter.v1";
 export const DEFAULT_BATCH_SIZE = 100;
 export const BROWSER_UI_DEFAULTS_VERSION = "1.1.17";
 

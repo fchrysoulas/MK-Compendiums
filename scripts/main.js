@@ -1,9 +1,4 @@
-import {
-  EXPORT_SCHEMA,
-  LEGACY_EXPORT_SCHEMA,
-  MODULE_ID,
-  OLDER_EXPORT_SCHEMA
-} from './constants.js';
+import { EXPORT_SCHEMA, MODULE_ID } from './constants.js';
 import { log } from './utils.js';
 import { applyBrowserUiSettingsToDocument, migrateBrowserUiDefaultsIfNeeded, registerSettings } from './settings.js';
 import { injectStyles } from './styles.js';
@@ -35,8 +30,6 @@ Hooks.once("init", () => {
   if (module) {
     module.api = {
       EXPORT_SCHEMA,
-      LEGACY_EXPORT_SCHEMA,
-      OLDER_EXPORT_SCHEMA,
       exportPackToJson,
       exportPackFolderToJson,
       exportCompendiumDirectoryFolderToJson,

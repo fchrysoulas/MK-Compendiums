@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 1.2.0
 
 - Hardened import reference rewriting so exact IDs and Foundry-style references are remapped without rewriting arbitrary prose.
 - Escaped pack and folder names in import confirmation dialog HTML.
 - Improved export, import, and settings dialog fallback handling.
 - Made browser search tolerate individual pack indexing failures while keeping results from other packs.
+- Removed obsolete legacy export schema constants from the module API.
 
 ## 1.1.27
 
