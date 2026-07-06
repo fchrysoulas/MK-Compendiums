@@ -2,4 +2,4 @@ dist/
 *.ps1
 package.json
 tests/
-AGENTS.md
+.agents/
