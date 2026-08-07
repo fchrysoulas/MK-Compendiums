@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.4.0
+
+- Added a results-view combobox for switching normal compendium search results between list and icon-grid layouts.
+- Added consistently sized square thumbnails, minimum-height icon cards, and a permanently available results scrollbar.
+- Removed the browser layout and color settings in favor of a consistent fixed design.
+- Restyled the compendium browser to match MK-Scene-Gallery's dark-glass surfaces, warm gold accents, controls, navigation rows, and result cards.
+- Reworked the browser toolbar with compact Document, Entry Type, and Package filters, an expanding search field, and right-aligned actions.
+- Removed the redundant Pack and Refresh dropdown/button controls; pack and folder selection now live exclusively in the sidebar.
+- Fixed filter resets, hidden pack constraints, entry-type options, and the transition from broken-link checks back to normal searches.
+- Changed searches and broken-link checks to use raw compendium indexes so malformed system documents cannot interrupt browser results.
+- Raised the minimum supported Foundry VTT version to v13; validation now targets v13 and v14 only.
 
 ## 1.3.1
 

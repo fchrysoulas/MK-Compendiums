@@ -1,13 +1,10 @@
 import {
   collectPackFolderTree,
-  documentIdOf,
   error,
   escapeHtml,
   getBrowserFolderRows,
   getBrowserPackIndex,
   getBrowserPackMeta,
-  getDocumentDescriptionSearchText,
-  getDocumentSource,
   getExportablePacks,
   getFolderPathForBrowser,
   getPackPackageName,
@@ -26,12 +23,12 @@ const BROWSER_WINDOW_TITLE = `MK Compendium Browser v${MODULE_VERSION}`;
 const FoundryApplicationV2 = foundry.applications?.api?.ApplicationV2;
 
 if (!FoundryApplicationV2) {
-  throw new Error("MK-Compendiums requires Foundry VTT v12+ with ApplicationV2 support.");
+  throw new Error("MK-Compendiums requires Foundry VTT v13+ with ApplicationV2 support.");
 }
 
 export class MkCompendiumBrowser extends FoundryApplicationV2 {
   /**
-   * ApplicationV2 options used by both Foundry v12 and v13.
+   * ApplicationV2 options used by supported Foundry versions.
    */
   static DEFAULT_OPTIONS = {
     id: "mk-compendiums-browser",
@@ -53,10 +50,12 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       query: "",
       documentName: "",
       entryType: "",
+      availableEntryTypes: [],
       packageName: "",
       packId: options.packId ?? "",
       folderId: options.folderId ?? "",
       results: [],
+      resultsView: "list",
       linkAuditActive: false,
       linkResults: [],
       searched: false,
@@ -64,7 +63,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       message: "Select a pack to browse, or search across all compendiums."
     };
     this.indexCache = new Map();
-    this.descriptionSearchCache = new Map();
     this._searchRequest = 0;
     this._sidebarScrollTop = 0;
     this._listenerController = null;
@@ -89,14 +87,14 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   /**
-   * ApplicationV2 render hook used by both Foundry v12 and v13.
+   * ApplicationV2 render hook used by supported Foundry versions.
    */
   async _renderHTML(_context, _options) {
     return this.buildHtml();
   }
 
   /**
-   * ApplicationV2 HTML replacement hook used by both Foundry v12 and v13.
+   * ApplicationV2 HTML replacement hook used by supported Foundry versions.
    */
   _getRenderContentElement(content) {
     if (content instanceof Element) return content;
@@ -110,7 +108,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   /**
-   * ApplicationV2 HTML replacement hook used by both Foundry v12 and v13.
+   * ApplicationV2 HTML replacement hook used by supported Foundry versions.
    * Foundry may pass either a DOM element, a jQuery object, or the
    * ApplicationV2 content wrapper depending on the render path. Normalize it
    * before replacing HTML so we do not call DOM methods on a wrapper object.
@@ -161,9 +159,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   get entryTypes() {
-    const types = new Set();
-    for (const entry of this.browserState.results ?? []) if (entry.type) types.add(entry.type);
-    return Array.from(types).sort();
+    return Array.from(this.browserState.availableEntryTypes ?? []);
   }
 
   getPackCacheKey(pack) {
@@ -187,36 +183,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     if (force) this.indexCache.delete(packId);
     if (!this.indexCache.has(packId)) this.indexCache.set(packId, await getBrowserPackIndex(pack, { force }));
     return this.indexCache.get(packId) ?? [];
-  }
-
-
-  async getDescriptionSearchIndexForPack(pack, { force = false } = {}) {
-    const packId = this.getPackCacheKey(pack);
-    if (!packId) return new Map();
-    if (force) this.descriptionSearchCache.delete(packId);
-
-    if (!this.descriptionSearchCache.has(packId)) {
-      const descriptionIndex = new Map();
-
-      try {
-        const documents = await pack.getDocuments();
-        for (const document of documents) {
-          const source = getDocumentSource(document);
-          const id = documentIdOf(source) ?? documentIdOf(document);
-          if (!id) continue;
-
-          const text = getDocumentDescriptionSearchText(source).toLocaleLowerCase();
-          if (text) descriptionIndex.set(id, text);
-        }
-      } catch (err) {
-        warn(`Could not load full documents for description search in "${getPackTitle(pack)}".`);
-        console.warn(err);
-      }
-
-      this.descriptionSearchCache.set(packId, descriptionIndex);
-    }
-
-    return this.descriptionSearchCache.get(packId) ?? new Map();
   }
 
   getCandidatePacks() {
@@ -250,28 +216,33 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     const requestId = ++this._searchRequest;
     this.browserState.linkAuditActive = false;
     this.browserState.linkResults = [];
+    this.browserState.results = [];
     this.browserState.loading = true;
     this.browserState.searched = true;
+    this.browserState.message = "Searching compendium entries...";
+
+    if (render) await this.render(true);
 
     try {
       const query = (this.browserState.query ?? "").toLocaleLowerCase();
       const results = [];
+      const availableEntryTypes = new Set();
       let failedPacks = 0;
 
       for (const pack of this.getCandidatePacks()) {
         try {
           const entries = await this.getIndexForPack(pack, { force });
-          const descriptionSearchIndex = query ? await this.getDescriptionSearchIndexForPack(pack, { force }) : null;
           const folderFilter = this.browserState.packId && this.browserState.folderId ? collectPackFolderTree(pack, this.browserState.folderId) : null;
 
           this._searchFailurePacks.delete(this.getPackCacheKey(pack));
 
           for (const entry of entries) {
+            if (entry.type) availableEntryTypes.add(entry.type);
             if (this.browserState.entryType && entry.type !== this.browserState.entryType) continue;
             if (folderFilter && !folderFilter.has(normalizeFolderReference(entry.folder))) continue;
             if (query) {
               const haystack = `${entry.name} ${entry.type} ${entry.packTitle} ${entry.packageName} ${getFolderPathForBrowser(pack, entry.folder)}`.toLocaleLowerCase();
-              const descriptionHaystack = descriptionSearchIndex?.get(entry.id) ?? "";
+              const descriptionHaystack = entry.descriptionSearchText ?? "";
               if (!haystack.includes(query) && !descriptionHaystack.includes(query)) continue;
             }
 
@@ -289,6 +260,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       if (requestId !== this._searchRequest) return;
 
       results.sort((a, b) => a.name.localeCompare(b.name) || a.packTitle.localeCompare(b.packTitle));
+      this.browserState.availableEntryTypes = Array.from(availableEntryTypes).sort();
       this.browserState.results = results;
       this.browserState.message = results.length
         ? `${results.length} result(s).${failedPacks ? ` ${failedPacks} pack(s) could not be searched.` : ""}`
@@ -297,13 +269,14 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           : "No matching compendium entries found.";
     } catch (err) {
       if (requestId !== this._searchRequest) return;
+      this.browserState.availableEntryTypes = [];
       this.browserState.results = [];
       this.browserState.message = "Search failed. Check the console for details.";
       error("Compendium browser search failed.", err);
     } finally {
       if (requestId === this._searchRequest) {
         this.browserState.loading = false;
-        if (render) this.render(true);
+        if (render) await this.render(true);
       }
     }
   }
@@ -321,30 +294,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     sidebar.addEventListener("scroll", () => {
       this._sidebarScrollTop = sidebar.scrollTop ?? 0;
     }, listenerOptions);
-  }
-
-  resetFiltersAndResults() {
-    this.browserState.query = "";
-    this.browserState.documentName = "";
-    this.browserState.entryType = "";
-    this.browserState.packageName = "";
-    this.browserState.packId = "";
-    this.browserState.folderId = "";
-    this.browserState.results = [];
-    this.browserState.linkAuditActive = false;
-    this.browserState.linkResults = [];
-    this.browserState.searched = false;
-    this.browserState.loading = false;
-    this.browserState.message = "Select a pack to browse, or search across all compendiums.";
-  }
-
-  async refreshBrowser() {
-    this.indexCache.clear();
-    this.descriptionSearchCache.clear();
-    this._searchFailurePacks.clear();
-    this._sidebarScrollTop = 0;
-    this.resetFiltersAndResults();
-    await this.runSearch({ force: true });
   }
 
   async runBrokenLinkCheck({ render = true } = {}) {
@@ -374,11 +323,11 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       ? `Checking item compendium UUID links in ${packs.length} pack(s)${includeWorld ? " and world item data" : ""}...`
       : "No matching Item or Actor compendium packs or world items to check.";
 
-    if (render) this.render(true);
+    if (render) await this.render(true);
 
     if (!packs.length && !includeWorld) {
       this.browserState.loading = false;
-      if (render) this.render(true);
+      if (render) await this.render(true);
       return;
     }
 
@@ -426,7 +375,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     } finally {
       if (requestId === this._searchRequest) {
         this.browserState.loading = false;
-        if (render) this.render(true);
+        if (render) await this.render(true);
       }
     }
   }
@@ -434,42 +383,28 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   buildFiltersHtml() {
     const documentOptions = this.documentNames.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.documentName === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
     const packageOptions = this.packageNames.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.packageName === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
-    const packOptions = this.filteredPackMetas.map(pack => `<option value="${escapeHtml(pack.id)}" ${this.browserState.packId === pack.id ? "selected" : ""}>${escapeHtml(pack.title)}</option>`).join("");
     const entryTypeOptions = this.entryTypes.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.entryType === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
 
     return `
       <form class="mkcm-browser-filters">
         <div class="mkcm-browser-search-row">
+          <select name="documentName" aria-label="Document type" title="Filter by document type">
+            <option value="">All documents</option>
+            ${documentOptions}
+          </select>
+          <select name="entryType" aria-label="Entry type" title="Filter by entry type">
+            <option value="">All entry types</option>
+            ${entryTypeOptions}
+          </select>
+          <select name="packageName" aria-label="Package" title="Filter by package">
+            <option value="">All packages</option>
+            ${packageOptions}
+          </select>
           <input type="search" name="query" value="${escapeHtml(this.browserState.query)}" placeholder="Search names, descriptions, packs, folders..." autocomplete="off" />
-          <button type="button" data-action="search"><i class="fas fa-search"></i> Search</button>
-          ${this.canManageCompendiums ? '<button type="button" data-action="check-links" title="Check item data in matching Item/Actor compendiums and world items for broken compendium UUID links"><i class="fas fa-unlink"></i> Check Links</button>' : ""}
-          <button type="button" data-action="refresh"><i class="fas fa-sync-alt"></i> Refresh</button>
-        </div>
-        <div class="mkcm-browser-filter-row">
-          <label>Document
-            <select name="documentName">
-              <option value="">All</option>
-              ${documentOptions}
-            </select>
-          </label>
-          <label>Entry Type
-            <select name="entryType">
-              <option value="">All loaded</option>
-              ${entryTypeOptions}
-            </select>
-          </label>
-          <label>Package
-            <select name="packageName">
-              <option value="">All</option>
-              ${packageOptions}
-            </select>
-          </label>
-          <label>Pack
-            <select name="packId">
-              <option value="">All matching packs</option>
-              ${packOptions}
-            </select>
-          </label>
+          <div class="mkcm-browser-search-actions">
+            <button type="button" data-action="search"><i class="fas fa-search"></i> Search</button>
+            ${this.canManageCompendiums ? '<button type="button" data-action="check-links" title="Check item data in matching Item/Actor compendiums and world items for broken compendium UUID links"><i class="fas fa-unlink"></i> Check Links</button>' : ""}
+          </div>
         </div>
       </form>
     `;
@@ -531,7 +466,9 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
     return this.browserState.results.map(entry => `
       <div class="mkcm-result-row" draggable="true" data-pack-id="${escapeHtml(entry.packId)}" data-entry-id="${escapeHtml(entry.id)}" data-document-name="${escapeHtml(entry.documentName)}">
-        <img class="mkcm-result-img" src="${escapeHtml(entry.img)}" alt="" />
+        <div class="mkcm-result-image">
+          <img class="mkcm-result-img" src="${escapeHtml(entry.img)}" alt="" />
+        </div>
         <div class="mkcm-result-main">
           <div class="mkcm-result-title">${escapeHtml(entry.name)}</div>
           <div class="mkcm-result-meta">
@@ -558,7 +495,9 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
       return `
         <div class="mkcm-result-row mkcm-broken-link-row" data-source-scope="${escapeHtml(link.sourceScope ?? "compendium")}" data-pack-id="${escapeHtml(link.packId)}" data-entry-id="${escapeHtml(link.documentId)}" data-document-name="${escapeHtml(link.documentName)}" data-link-index="${index}">
-          <img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" />
+          <div class="mkcm-result-image">
+            <img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" />
+          </div>
           <div class="mkcm-result-main">
             <div class="mkcm-broken-link-header">
               <div class="mkcm-broken-link-title"><i class="fas fa-unlink"></i> ${escapeHtml(link.itemName ?? link.sourceName)}</div>
@@ -589,6 +528,9 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   buildHtml() {
+    const canUseIconResults = !(this.browserState.linkAuditActive && this.canManageCompendiums);
+    const resultsListClass = this.browserState.resultsView === "icons" && canUseIconResults ? " mkcm-results-icons" : "";
+
     return `
       <div class="mkcm-browser">
         ${this.buildFiltersHtml()}
@@ -601,10 +543,22 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
           </aside>
           <main class="mkcm-browser-results">
             <div class="mkcm-results-header">
-              <strong>${this.browserState.linkAuditActive && this.canManageCompendiums ? "Broken Links" : "Results"}</strong>
-              <span>${escapeHtml(this.browserState.message)}</span>
+              <div class="mkcm-results-heading">
+                <strong>${this.browserState.linkAuditActive && this.canManageCompendiums ? "Broken Links" : "Results"}</strong>
+                <span class="mkcm-results-status">${escapeHtml(this.browserState.message)}</span>
+              </div>
+              ${canUseIconResults ? `
+                <label class="mkcm-results-view" title="Choose how search results are displayed">
+                  <i class="fas fa-table-cells-large" aria-hidden="true"></i>
+                  <span>View</span>
+                  <select name="resultsView" aria-label="Results display">
+                    <option value="list" ${this.browserState.resultsView === "list" ? "selected" : ""}>List</option>
+                    <option value="icons" ${this.browserState.resultsView === "icons" ? "selected" : ""}>Icons</option>
+                  </select>
+                </label>
+              ` : ""}
             </div>
-            <div class="mkcm-results-list">${this.buildResultsHtml()}</div>
+            <div class="mkcm-results-list${resultsListClass}">${this.buildResultsHtml()}</div>
           </main>
         </div>
       </div>
@@ -673,11 +627,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       await this.runSearch();
     }, listenerOptions);
 
-    root.querySelector('[data-action="refresh"]')?.addEventListener("click", async event => {
-      event.preventDefault();
-      await this.refreshBrowser();
-    }, listenerOptions);
-
     if (this.canManageCompendiums) {
       root.querySelector('[data-action="check-links"]')?.addEventListener("click", async event => {
         event.preventDefault();
@@ -695,9 +644,18 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
     for (const select of root.querySelectorAll("select")) {
       select.addEventListener("change", async () => {
-        const previousPackId = this.browserState.packId;
+        if (select.name === "resultsView") {
+          this.browserState.resultsView = select.value === "icons" ? "icons" : "list";
+          this.render(true);
+          return;
+        }
+
         readBrowserStateFromForm(root, this.browserState);
-        if (["documentName", "packageName"].includes(select.name) || (select.name === "packId" && this.browserState.packId !== previousPackId)) this.browserState.folderId = "";
+        if (["documentName", "packageName"].includes(select.name)) {
+          this.browserState.entryType = "";
+          this.browserState.packId = "";
+          this.browserState.folderId = "";
+        }
         await this.runSearch();
       }, listenerOptions);
     }
@@ -707,7 +665,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       if (!button) return;
       const action = button.dataset.action;
 
-      if (["search", "refresh", "check-links"].includes(action)) return;
+      if (["search", "check-links"].includes(action)) return;
 
       event.preventDefault();
       event.stopPropagation();

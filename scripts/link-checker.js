@@ -9,6 +9,7 @@ import {
   getDocumentSource,
   getFolderName,
   getPackTitle,
+  getRawCompendiumIndex,
   normalizeFolderReference,
   notifyInfo,
   resetCompendiumIndexCache,
@@ -48,6 +49,31 @@ function packCanContainItems(pack) {
 function getEmbeddedItems(source) {
   if (Array.isArray(source?.items)) return source.items;
   if (Array.isArray(source?.items?.contents)) return source.items.contents;
+  return [];
+}
+
+function getEmbeddedDocumentsByName(source, documentName) {
+  const collectionKeys = {
+    ActiveEffect: "effects",
+    AmbientLight: "lights",
+    Combatant: "combatants",
+    Drawing: "drawings",
+    Item: "items",
+    JournalEntryPage: "pages",
+    MeasuredTemplate: "templates",
+    Note: "notes",
+    PlaylistSound: "sounds",
+    Region: "regions",
+    RegionBehavior: "behaviors",
+    TableResult: "results",
+    Tile: "tiles",
+    Token: "tokens",
+    Wall: "walls"
+  };
+  const key = collectionKeys[documentName] ?? `${String(documentName ?? "").toLocaleLowerCase()}s`;
+  const collection = source?.[key];
+  if (Array.isArray(collection)) return collection;
+  if (Array.isArray(collection?.contents)) return collection.contents;
   return [];
 }
 
@@ -357,6 +383,35 @@ export function findUuidReferencesInSource(source) {
   return references;
 }
 
+async function resolveCompendiumUuidFromIndex(uuid) {
+  const packs = collectionValues(game.packs)
+    .filter(pack => pack?.collection)
+    .sort((a, b) => b.collection.length - a.collection.length);
+  const pack = packs.find(candidate => uuid.startsWith(`Compendium.${candidate.collection}.`));
+  if (!pack) return { found: false, reason: "Target compendium pack was not found." };
+
+  const remainder = uuid.slice(`Compendium.${pack.collection}.`.length).split(".").filter(Boolean);
+  const documentName = getPackDocumentName(pack);
+  if (remainder[0] === documentName) remainder.shift();
+
+  const documentId = remainder.shift();
+  if (!documentId) return { found: false, reason: "Target document ID is missing." };
+
+  const sources = await getRawCompendiumIndex(pack);
+  let source = sources.find(entry => documentIdOf(entry) === documentId);
+  if (!source) return { found: false, reason: "Target document was not found." };
+
+  while (remainder.length >= 2) {
+    const embeddedName = remainder.shift();
+    const embeddedId = remainder.shift();
+    source = getEmbeddedDocumentsByName(source, embeddedName).find(entry => documentIdOf(entry) === embeddedId);
+    if (!source) return { found: false, reason: `Target embedded ${embeddedName} was not found.` };
+  }
+
+  if (remainder.length) return { found: false, reason: "Target UUID has an incomplete embedded document path." };
+  return { found: true };
+}
+
 async function resolveUuid(uuid, cache) {
   if (!uuid) return { found: false, reason: "Empty UUID." };
   if (!isPotentialCompendiumUuid(uuid)) return { found: false, reason: "UUID is not a compendium UUID." };
@@ -364,15 +419,10 @@ async function resolveUuid(uuid, cache) {
 
   const promise = (async () => {
     try {
-      if (typeof globalThis.fromUuid === "function") {
-        const document = await globalThis.fromUuid(uuid);
-        if (document) return { found: true, document };
-      }
+      return await resolveCompendiumUuidFromIndex(uuid);
     } catch (err) {
       return { found: false, reason: err?.message ?? "UUID resolution failed." };
     }
-
-    return { found: false, reason: "Target document was not found." };
   })();
 
   cache?.set(uuid, promise);
@@ -458,14 +508,14 @@ export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null,
   const brokenLinks = [];
 
   for (const pack of packs ?? []) {
-    if (!pack?.getDocuments) continue;
+    if (!pack?.getIndex) continue;
     if (!packCanContainItems(pack)) continue;
 
     let documents = [];
     try {
-      documents = await pack.getDocuments();
+      documents = await getRawCompendiumIndex(pack);
     } catch (err) {
-      console.warn(`MK-Compendiums | Could not load documents for link check in ${getPackTitle(pack)}.`, err);
+      console.warn(`MK-Compendiums | Could not load raw index data for link check in ${getPackTitle(pack)}.`, err);
       onPackScanned?.(pack, { failed: true });
       continue;
     }

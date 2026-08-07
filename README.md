@@ -4,7 +4,7 @@ A small, system-agnostic Foundry VTT module for browsing, searching, exporting, 
 
 ## Features
 
-- Supports Foundry VTT v12, v13, and v14 with one module package.
+- Supports Foundry VTT v13 and v14.
 - Opens the **MK Compendium Browser** from the left scene controls toolbar.
 - Makes the browser available to players and GMs.
 - Keeps import/export tools GM-only.
@@ -22,26 +22,9 @@ A small, system-agnostic Foundry VTT module for browsing, searching, exporting, 
 - Provides a Refresh button that clears filters, clears index caches, and reloads compendium indexes.
 - Shows the module version in the MK Compendium Browser window title.
 
-## Browser UI Settings
+## Browser Style
 
-The browser UI settings appear in:
-
-```text
-Configure Settings -> Module Settings -> MK-Compendiums
-```
-
-The module includes world-scoped settings for:
-
-- Pack and folder row height.
-- Browser icon size.
-- Sidebar width.
-- Result thumbnail size.
-- Folder indentation.
-- Selected row background color.
-- Selected row hover background color.
-- Selected row accent color.
-
-After saving browser UI settings, the module asks whether to reload the current Foundry client so the shared layout is fully refreshed.
+The compendium browser uses the same fixed dark-glass visual language as MK-Scene-Gallery, with warm gold accents, glass surfaces, and elevated interactive rows. Browser styling is no longer exposed as module settings.
 
 ## Export Features
 

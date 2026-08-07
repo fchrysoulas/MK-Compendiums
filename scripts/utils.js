@@ -120,6 +120,49 @@ export function getDocumentDescriptionSearchText(source) {
   return parts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
 }
 
+export const RAW_COMPENDIUM_INDEX_FIELDS = [
+  "name",
+  "img",
+  "thumb",
+  "thumbnail",
+  "type",
+  "folder",
+  "sort",
+  "system",
+  "flags",
+  "description",
+  "text",
+  "content",
+  "items",
+  "effects",
+  "pages",
+  "results",
+  "sounds",
+  "walls",
+  "lights",
+  "tokens",
+  "drawings",
+  "notes",
+  "tiles",
+  "templates",
+  "regions",
+  "behaviors",
+  "combatants"
+];
+
+export async function getRawCompendiumIndex(pack, { fields = RAW_COMPENDIUM_INDEX_FIELDS, force = false } = {}) {
+  if (!pack?.getIndex) return [];
+  if (force) resetCompendiumIndexCache(pack);
+
+  try {
+    const index = await pack.getIndex({ fields: Array.from(new Set(fields)) });
+    return collectionValues(index);
+  } catch (_err) {
+    const index = await pack.getIndex();
+    return collectionValues(index);
+  }
+}
+
 export function getPackFoldersSource(pack) {
   const folders = collectionValues(pack.folders);
   return folders
@@ -734,16 +777,9 @@ export function resetCompendiumIndexCache(pack) {
 
 export async function getBrowserPackIndex(pack, { force = false } = {}) {
   if (!pack) return [];
-  if (force) resetCompendiumIndexCache(pack);
+  const index = await getRawCompendiumIndex(pack, { force });
 
-  let index;
-  try {
-    index = await pack.getIndex({ fields: ["name", "img", "thumb", "thumbnail", "type", "folder", "sort"], force });
-  } catch (_err) {
-    index = await pack.getIndex();
-  }
-
-  return collectionValues(index).map(entry => ({
+  return index.map(entry => ({
     id: entry?._id ?? entry?.id ?? null,
     name: entry?.name ?? "(Unnamed)",
     img: entry?.img ?? entry?.thumb ?? entry?.thumbnail ?? "icons/svg/book.svg",
@@ -754,6 +790,7 @@ export async function getBrowserPackIndex(pack, { force = false } = {}) {
     packTitle: getPackTitle(pack),
     documentName: pack.documentName ?? pack.metadata?.type ?? "Unknown",
     packageName: getPackPackageName(pack),
+    descriptionSearchText: getDocumentDescriptionSearchText(entry).toLocaleLowerCase(),
     uuid: entry?.uuid ?? `Compendium.${pack.collection}.${entry?._id ?? entry?.id ?? ""}`
   })).filter(entry => entry.id);
 }

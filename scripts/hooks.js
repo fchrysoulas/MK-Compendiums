@@ -51,25 +51,7 @@ function addToolToControl(control) {
 
 export function registerCompendiumBrowserSceneControl() {
   Hooks.on("getSceneControlButtons", controls => {
-    // Foundry v12 passes an Array<SceneControl>.
-    if (Array.isArray(controls)) {
-      const tokenControl = controls.find(control => ["token", "tokens"].includes(control?.name));
-      if (addToolToControl(tokenControl)) return;
-
-      if (!controls.some(control => control?.name === MODULE_ID)) {
-        controls.push({
-          name: MODULE_ID,
-          title: "MK-Compendiums",
-          icon: "fa-solid fa-book",
-          layer: "controls",
-          activeTool: `${MODULE_ID}-browser`,
-          tools: [getBrowserSceneTool(0)]
-        });
-      }
-      return;
-    }
-
-    // Foundry v13 passes a Record<string, SceneControl>.
+    // Foundry v13+ passes a Record<string, SceneControl>.
     const tokenControl = controls?.tokens ?? controls?.token;
     if (addToolToControl(tokenControl)) return;
 
