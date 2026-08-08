@@ -1,6 +1,4 @@
 import { EXPORT_SCHEMA, MODULE_ID } from './constants.js';
-import { log } from './utils.js';
-import { injectStyles } from './styles.js';
 import { registerCompendiumBrowserSceneControl, registerCompendiumContextMenu } from './hooks.js';
 import { openCompendiumBrowser } from './browser.js';
 import {
@@ -21,11 +19,10 @@ import {
   findBrokenLinksInWorld,
   openBrokenLinkFixDialog
 } from './link-checker.js';
+import { log } from './utils.js';
 
 Hooks.once("init", () => {
   log("Initializing");
-  injectStyles();
-
   registerCompendiumContextMenu();
   registerCompendiumBrowserSceneControl();
 
