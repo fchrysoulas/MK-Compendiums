@@ -12,36 +12,25 @@ import {
   normalizeFolderReference,
   readBrowserStateFromForm,
   resolvePack,
+  runWithConcurrency,
   warn
 } from './utils.js';
 import { confirmExportAction, exportPackToJson } from './exporter.js';
 import { openImportDialog } from './importer.js';
 import { findBrokenLinksInPacks, findBrokenLinksInWorld } from './link-checker.js';
-import { MODULE_VERSION } from './constants.js';
+import { getModuleVersion } from './constants.js';
 
-const BROWSER_WINDOW_TITLE = `MK Compendium Browser v${MODULE_VERSION}`;
+function getBrowserWindowTitle() { return `MK Compendium Browser v${getModuleVersion()}`; }
 const FoundryApplicationV2 = foundry.applications?.api?.ApplicationV2;
 
-if (!FoundryApplicationV2) {
-  throw new Error("MK-Compendiums requires Foundry VTT v13+ with ApplicationV2 support.");
-}
+if (!FoundryApplicationV2) throw new Error("MK-Compendiums requires Foundry VTT v13+ with ApplicationV2 support.");
 
 export class MkCompendiumBrowser extends FoundryApplicationV2 {
-  /**
-   * ApplicationV2 options used by supported Foundry versions.
-   */
   static DEFAULT_OPTIONS = {
     id: "mk-compendiums-browser",
     classes: ["mk-compendiums-browser"],
-    window: {
-      title: BROWSER_WINDOW_TITLE,
-      icon: "fa-solid fa-book",
-      resizable: true
-    },
-    position: {
-      width: 980,
-      height: 720
-    }
+    window: { title: "MK Compendium Browser", icon: "fa-solid fa-book", resizable: true },
+    position: { width: 980, height: 720 }
   };
 
   constructor(options = {}) {
@@ -68,34 +57,15 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     this._listenerController = null;
     this._busyActions = new Set();
     this._searchFailurePacks = new Set();
+    this._degradedIndexPacks = new Set();
   }
 
-  /**
-   * Mutable browser UI state. Do not use the name "state" here: in
-   * Foundry v13 ApplicationV2, state is a read-only render-state getter.
-   */
-  get browserState() {
-    return this._browserState;
-  }
+  get browserState() { return this._browserState; }
+  get canManageCompendiums() { return game.user?.isGM === true; }
+  get title() { return getBrowserWindowTitle(); }
 
-  get canManageCompendiums() {
-    return game.user?.isGM === true;
-  }
+  async _renderHTML(_context, _options) { return this.buildHtml(); }
 
-  get title() {
-    return BROWSER_WINDOW_TITLE;
-  }
-
-  /**
-   * ApplicationV2 render hook used by supported Foundry versions.
-   */
-  async _renderHTML(_context, _options) {
-    return this.buildHtml();
-  }
-
-  /**
-   * ApplicationV2 HTML replacement hook used by supported Foundry versions.
-   */
   _getRenderContentElement(content) {
     if (content instanceof Element) return content;
     if (Array.isArray(content) && content[0] instanceof Element) return content[0];
@@ -107,40 +77,26 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     return null;
   }
 
-  /**
-   * ApplicationV2 HTML replacement hook used by supported Foundry versions.
-   * Foundry may pass either a DOM element, a jQuery object, or the
-   * ApplicationV2 content wrapper depending on the render path. Normalize it
-   * before replacing HTML so we do not call DOM methods on a wrapper object.
-   */
   _replaceHTML(result, content, _options) {
     const html = typeof result === "string" ? result : String(result ?? "");
     const template = document.createElement("template");
     template.innerHTML = html.trim();
     const target = this._getRenderContentElement(content);
-
     if (!target) {
       error("Could not resolve MK Compendium Browser render target.");
       return;
     }
-
     const nodes = Array.from(template.content.childNodes);
     if (typeof target.replaceChildren === "function") target.replaceChildren(...nodes);
     else {
       while (target.firstChild) target.removeChild(target.firstChild);
       for (const node of nodes) target.appendChild(node);
     }
-
     this.activateBrowserListeners(target);
   }
 
-  get packs() {
-    return getExportablePacks();
-  }
-
-  get packMetas() {
-    return this.packs.map(getBrowserPackMeta);
-  }
+  get packs() { return getExportablePacks(); }
+  get packMetas() { return this.packs.map(getBrowserPackMeta); }
 
   get filteredPackMetas() {
     return this.packMetas.filter(pack => {
@@ -150,44 +106,48 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     });
   }
 
-  get documentNames() {
-    return Array.from(new Set(this.packMetas.map(pack => pack.documentName).filter(Boolean))).sort();
-  }
+  get documentNames() { return Array.from(new Set(this.packMetas.map(pack => pack.documentName).filter(Boolean))).sort(); }
+  get packageNames() { return Array.from(new Set(this.packMetas.map(pack => pack.packageName).filter(Boolean))).sort(); }
+  get entryTypes() { return Array.from(this.browserState.availableEntryTypes ?? []); }
 
-  get packageNames() {
-    return Array.from(new Set(this.packMetas.map(pack => pack.packageName).filter(Boolean))).sort();
-  }
-
-  get entryTypes() {
-    return Array.from(this.browserState.availableEntryTypes ?? []);
-  }
-
-  getPackCacheKey(pack) {
-    return pack?.collection ?? pack?.metadata?.id ?? pack?.metadata?.name ?? "";
-  }
+  getPackCacheKey(pack) { return pack?.collection ?? pack?.metadata?.id ?? pack?.metadata?.name ?? ""; }
 
   notePackSearchFailure(pack, err) {
     const packKey = this.getPackCacheKey(pack) || getPackTitle(pack);
-
     if (!this._searchFailurePacks.has(packKey)) {
       this._searchFailurePacks.add(packKey);
       warn(`Could not search compendium "${getPackTitle(pack)}". Check the console for details.`);
     }
-
     console.warn(err);
   }
 
-  async getIndexForPack(pack, { force = false } = {}) {
+  noteDeepIndexFallback(pack, err) {
+    const packKey = this.getPackCacheKey(pack) || getPackTitle(pack);
+    this._degradedIndexPacks.add(packKey);
+    console.warn(`MK-Compendiums | Deep index fields were rejected by "${getPackTitle(pack)}". Falling back to the basic index; description matches may be incomplete.`, err);
+  }
+
+  async getIndexForPack(pack, { force = false, deep = false } = {}) {
     const packId = this.getPackCacheKey(pack);
     if (!packId) return [];
-    if (force) this.indexCache.delete(packId);
-    if (!this.indexCache.has(packId)) this.indexCache.set(packId, await getBrowserPackIndex(pack, { force }));
-    return this.indexCache.get(packId) ?? [];
+    const cacheKey = `${packId}:${deep ? "deep" : "basic"}`;
+    if (force) {
+      this.indexCache.delete(`${packId}:basic`);
+      this.indexCache.delete(`${packId}:deep`);
+    }
+    if (!this.indexCache.has(cacheKey)) {
+      this.indexCache.set(cacheKey, await getBrowserPackIndex(pack, {
+        force,
+        deep,
+        onFallback: deep ? err => this.noteDeepIndexFallback(pack, err) : null
+      }));
+    }
+    return this.indexCache.get(cacheKey) ?? [];
   }
 
   getCandidatePacks() {
     let packs = this.packs;
-    if (this.browserState.packId) packs = packs.filter(pack => (pack.collection ?? pack.metadata?.id ?? pack.metadata?.name) === this.browserState.packId);
+    if (this.browserState.packId) packs = packs.filter(pack => this.getPackCacheKey(pack) === this.browserState.packId);
     if (this.browserState.documentName) packs = packs.filter(pack => (pack.documentName ?? pack.metadata?.type) === this.browserState.documentName);
     if (this.browserState.packageName) packs = packs.filter(pack => getPackPackageName(pack) === this.browserState.packageName);
     return packs;
@@ -198,13 +158,11 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   }
 
   canIncludeWorldItemSources() {
-    if (this.browserState.documentName && !["Item", "Actor"].includes(this.browserState.documentName)) return false;
-    return true;
+    return !this.browserState.documentName || ["Item", "Actor"].includes(this.browserState.documentName);
   }
 
   getWorldItemSourceOptions() {
     if (!this.canIncludeWorldItemSources()) return { includeWorld: false, includeItems: false, includeActors: false };
-
     return {
       includeWorld: true,
       includeItems: !this.browserState.documentName || this.browserState.documentName === "Item",
@@ -220,40 +178,47 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     this.browserState.loading = true;
     this.browserState.searched = true;
     this.browserState.message = "Searching compendium entries...";
+    this._degradedIndexPacks.clear();
 
     if (render) await this.render(true);
 
     try {
       const query = (this.browserState.query ?? "").toLocaleLowerCase();
+      const deep = Boolean(query);
       const results = [];
       const availableEntryTypes = new Set();
       let failedPacks = 0;
+      const packs = this.getCandidatePacks();
 
-      for (const pack of this.getCandidatePacks()) {
+      const packResults = await runWithConcurrency(packs, async pack => {
         try {
-          const entries = await this.getIndexForPack(pack, { force });
-          const folderFilter = this.browserState.packId && this.browserState.folderId ? collectPackFolderTree(pack, this.browserState.folderId) : null;
-
+          const entries = await this.getIndexForPack(pack, { force, deep });
           this._searchFailurePacks.delete(this.getPackCacheKey(pack));
-
-          for (const entry of entries) {
-            if (entry.type) availableEntryTypes.add(entry.type);
-            if (this.browserState.entryType && entry.type !== this.browserState.entryType) continue;
-            if (folderFilter && !folderFilter.has(normalizeFolderReference(entry.folder))) continue;
-            if (query) {
-              const haystack = `${entry.name} ${entry.type} ${entry.packTitle} ${entry.packageName} ${getFolderPathForBrowser(pack, entry.folder)}`.toLocaleLowerCase();
-              const descriptionHaystack = entry.descriptionSearchText ?? "";
-              if (!haystack.includes(query) && !descriptionHaystack.includes(query)) continue;
-            }
-
-            results.push({
-              ...entry,
-              folderPath: getFolderPathForBrowser(pack, entry.folder)
-            });
-          }
+          return { pack, entries, failed: false };
         } catch (err) {
-          failedPacks += 1;
           this.notePackSearchFailure(pack, err);
+          return { pack, entries: [], failed: true };
+        }
+      });
+
+      for (const { pack, entries, failed } of packResults) {
+        if (failed) {
+          failedPacks += 1;
+          continue;
+        }
+        const folderFilter = this.browserState.packId && this.browserState.folderId
+          ? collectPackFolderTree(pack, this.browserState.folderId)
+          : null;
+
+        for (const entry of entries) {
+          if (entry.type) availableEntryTypes.add(entry.type);
+          if (this.browserState.entryType && entry.type !== this.browserState.entryType) continue;
+          if (folderFilter && !folderFilter.has(normalizeFolderReference(entry.folder))) continue;
+          if (query) {
+            const haystack = `${entry.name} ${entry.type} ${entry.packTitle} ${entry.packageName} ${getFolderPathForBrowser(pack, entry.folder)}`.toLocaleLowerCase();
+            if (!haystack.includes(query) && !(entry.descriptionSearchText ?? "").includes(query)) continue;
+          }
+          results.push({ ...entry, folderPath: getFolderPathForBrowser(pack, entry.folder) });
         }
       }
 
@@ -262,11 +227,14 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       results.sort((a, b) => a.name.localeCompare(b.name) || a.packTitle.localeCompare(b.packTitle));
       this.browserState.availableEntryTypes = Array.from(availableEntryTypes).sort();
       this.browserState.results = results;
+
+      const notes = [];
+      if (failedPacks) notes.push(`${failedPacks} pack(s) could not be searched.`);
+      if (deep && this._degradedIndexPacks.size) notes.push(`${this._degradedIndexPacks.size} pack(s) used a basic index; description matches may be incomplete.`);
+      const suffix = notes.length ? ` ${notes.join(" ")}` : "";
       this.browserState.message = results.length
-        ? `${results.length} result(s).${failedPacks ? ` ${failedPacks} pack(s) could not be searched.` : ""}`
-        : failedPacks
-          ? `No matching compendium entries found. ${failedPacks} pack(s) could not be searched.`
-          : "No matching compendium entries found.";
+        ? `${results.length} result(s).${suffix}`
+        : `No matching compendium entries found.${suffix}`;
     } catch (err) {
       if (requestId !== this._searchRequest) return;
       this.browserState.availableEntryTypes = [];
@@ -289,11 +257,8 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   restoreSidebarScroll(root, listenerOptions = {}) {
     const sidebar = root?.querySelector?.(".mkcm-browser-sidebar");
     if (!sidebar) return;
-
     sidebar.scrollTop = this._sidebarScrollTop ?? 0;
-    sidebar.addEventListener("scroll", () => {
-      this._sidebarScrollTop = sidebar.scrollTop ?? 0;
-    }, listenerOptions);
+    sidebar.addEventListener("scroll", () => { this._sidebarScrollTop = sidebar.scrollTop ?? 0; }, listenerOptions);
   }
 
   async runBrokenLinkCheck({ render = true } = {}) {
@@ -309,9 +274,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     const folderFilters = new Map();
 
     if (this.browserState.packId && this.browserState.folderId) {
-      for (const pack of packs) {
-        folderFilters.set(this.getPackCacheKey(pack), collectPackFolderTree(pack, this.browserState.folderId));
-      }
+      for (const pack of packs) folderFilters.set(this.getPackCacheKey(pack), collectPackFolderTree(pack, this.browserState.folderId));
     }
 
     this.browserState.linkAuditActive = true;
@@ -324,7 +287,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       : "No matching Item or Actor compendium packs or world items to check.";
 
     if (render) await this.render(true);
-
     if (!packs.length && !includeWorld) {
       this.browserState.loading = false;
       if (render) await this.render(true);
@@ -333,15 +295,16 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
     try {
       let failedPacks = 0;
+      let degradedPacks = 0;
       const resolutionCache = new Map();
       const compendiumLinkResults = await findBrokenLinksInPacks(packs, {
         shouldScanDocument: (_document, source, pack) => {
           const folderFilter = folderFilters.get(this.getPackCacheKey(pack));
-          if (!folderFilter) return true;
-          return folderFilter.has(normalizeFolderReference(source?.folder));
+          return !folderFilter || folderFilter.has(normalizeFolderReference(source?.folder));
         },
         onPackScanned: (_pack, result) => {
           if (result?.failed) failedPacks += 1;
+          else if (result?.degraded) degradedPacks += 1;
         },
         resolutionCache
       });
@@ -350,22 +313,24 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
         includeActors: worldOptions.includeActors,
         resolutionCache
       }) : [];
-      const linkResults = [...compendiumLinkResults, ...worldLinkResults]
-        .sort((a, b) =>
-          (a.sourceScope ?? "").localeCompare(b.sourceScope ?? "")
-          || (a.packTitle ?? "").localeCompare(b.packTitle ?? "")
-          || (a.sourceName ?? "").localeCompare(b.sourceName ?? "")
-          || (a.pathLabel ?? "").localeCompare(b.pathLabel ?? "")
-          || (a.normalizedUuid ?? "").localeCompare(b.normalizedUuid ?? "")
-        );
+      const linkResults = [...compendiumLinkResults, ...worldLinkResults].sort((a, b) =>
+        (a.sourceScope ?? "").localeCompare(b.sourceScope ?? "")
+        || (a.packTitle ?? "").localeCompare(b.packTitle ?? "")
+        || (a.sourceName ?? "").localeCompare(b.sourceName ?? "")
+        || (a.pathLabel ?? "").localeCompare(b.pathLabel ?? "")
+        || (a.normalizedUuid ?? "").localeCompare(b.normalizedUuid ?? "")
+      );
 
       if (requestId !== this._searchRequest) return;
-
       this.browserState.linkResults = linkResults;
+      const auditNotes = [
+        failedPacks ? `${failedPacks} pack(s) could not be checked.` : "",
+        degradedPacks ? `${degradedPacks} pack(s) returned only a basic index; embedded-link results may be incomplete.` : ""
+      ].filter(Boolean).join(" ");
       this.browserState.message = linkResults.length
-        ? `${linkResults.length} broken item compendium UUID link(s) found.${failedPacks ? ` ${failedPacks} pack(s) could not be checked.` : ""}`
-        : failedPacks
-          ? `No broken item compendium UUID links found. ${failedPacks} pack(s) could not be checked.`
+        ? `${linkResults.length} broken item compendium UUID link(s) found.${auditNotes ? ` ${auditNotes}` : ""}`
+        : auditNotes
+          ? `No broken item compendium UUID links found. ${auditNotes}`
           : "No broken item compendium UUID links found in matching compendiums or world items.";
     } catch (err) {
       if (requestId !== this._searchRequest) return;
@@ -384,105 +349,62 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     const documentOptions = this.documentNames.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.documentName === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
     const packageOptions = this.packageNames.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.packageName === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
     const entryTypeOptions = this.entryTypes.map(name => `<option value="${escapeHtml(name)}" ${this.browserState.entryType === name ? "selected" : ""}>${escapeHtml(name)}</option>`).join("");
-
     return `
       <form class="mkcm-browser-filters">
         <div class="mkcm-browser-search-row">
-          <select name="documentName" aria-label="Document type" title="Filter by document type">
-            <option value="">All documents</option>
-            ${documentOptions}
-          </select>
-          <select name="entryType" aria-label="Entry type" title="Filter by entry type">
-            <option value="">All entry types</option>
-            ${entryTypeOptions}
-          </select>
-          <select name="packageName" aria-label="Package" title="Filter by package">
-            <option value="">All packages</option>
-            ${packageOptions}
-          </select>
+          <select name="documentName" aria-label="Document type" title="Filter by document type"><option value="">All documents</option>${documentOptions}</select>
+          <select name="entryType" aria-label="Entry type" title="Filter by entry type"><option value="">All entry types</option>${entryTypeOptions}</select>
+          <select name="packageName" aria-label="Package" title="Filter by package"><option value="">All packages</option>${packageOptions}</select>
           <input type="search" name="query" value="${escapeHtml(this.browserState.query)}" placeholder="Search names, descriptions, packs, folders..." autocomplete="off" />
           <div class="mkcm-browser-search-actions">
             <button type="button" data-action="search"><i class="fas fa-search"></i> Search</button>
             ${this.canManageCompendiums ? '<button type="button" data-action="check-links" title="Check item data in matching Item/Actor compendiums and world items for broken compendium UUID links"><i class="fas fa-unlink"></i> Check Links</button>' : ""}
           </div>
         </div>
-      </form>
-    `;
+      </form>`;
   }
 
   buildPackFolderTreeHtml(packMeta) {
     if (!packMeta?.id || this.browserState.packId !== packMeta.id) return "";
-
     const pack = resolvePack(packMeta.id);
     if (!pack) return "";
-
     const rows = getBrowserFolderRows(pack);
-    if (!rows.length) {
-      return '<div class="mkcm-pack-folder-tree"><div class="mkcm-empty mkcm-tree-empty">No internal folders.</div></div>';
-    }
-
-    return `
-      <div class="mkcm-pack-folder-tree" data-pack-id="${escapeHtml(packMeta.id)}">
-        ${rows.map(folder => `
-          <div class="mkcm-folder-row-wrap ${this.browserState.folderId === folder.id ? "active" : ""}" data-pack-id="${escapeHtml(packMeta.id)}" data-folder-id="${escapeHtml(folder.id)}" style="--mkcm-folder-depth:${folder.depth};${folder.color ? `--mkcm-folder-color:${escapeHtml(folder.color)};` : ""}">
-            <button type="button" class="mkcm-folder-main" data-action="select-folder" title="Browse this folder">
-              <span><i class="fas fa-folder mkcm-folder-icon"></i> ${escapeHtml(folder.name)}</span>
-            </button>
-          </div>
-        `).join("")}
-      </div>
-    `;
+    if (!rows.length) return '<div class="mkcm-pack-folder-tree"><div class="mkcm-empty mkcm-tree-empty">No internal folders.</div></div>';
+    return `<div class="mkcm-pack-folder-tree" data-pack-id="${escapeHtml(packMeta.id)}">
+      ${rows.map(folder => `<div class="mkcm-folder-row-wrap ${this.browserState.folderId === folder.id ? "active" : ""}" data-pack-id="${escapeHtml(packMeta.id)}" data-folder-id="${escapeHtml(folder.id)}" style="--mkcm-folder-depth:${folder.depth};${folder.color ? `--mkcm-folder-color:${escapeHtml(folder.color)};` : ""}">
+        <button type="button" class="mkcm-folder-main" data-action="select-folder" title="Browse this folder"><span><i class="fas fa-folder mkcm-folder-icon"></i> ${escapeHtml(folder.name)}</span></button>
+      </div>`).join("")}</div>`;
   }
 
   buildPackListHtml() {
     const packs = this.filteredPackMetas;
     if (!packs.length) return '<div class="mkcm-empty">No matching compendium packs.</div>';
-
-    return packs.map(pack => `
-      <div class="mkcm-pack-block ${this.browserState.packId === pack.id ? "active" : ""}" data-pack-id="${escapeHtml(pack.id)}">
-        <div class="mkcm-pack-row ${this.browserState.packId === pack.id && !this.browserState.folderId ? "active" : ""}">
-          <button type="button" class="mkcm-pack-main" data-action="select-pack" title="Browse this pack">
-            <span class="mkcm-pack-title"><i class="fas fa-book"></i> ${escapeHtml(pack.title)}</span>
-            <span class="mkcm-pack-meta">${escapeHtml(pack.documentName)} · ${escapeHtml(pack.packageName)}${pack.locked ? " · locked" : ""}</span>
-          </button>
-          <div class="mkcm-row-tools">
-            <button type="button" data-action="view-pack" title="Open this compendium"><i class="fas fa-eye"></i></button>
-            ${this.canManageCompendiums ? `
-              <button type="button" data-action="export-pack" title="Export this pack"><i class="fas fa-file-export"></i></button>
-              <button type="button" data-action="import-pack" title="Import JSON into this pack"><i class="fas fa-file-import"></i></button>
-            ` : ""}
-          </div>
+    return packs.map(pack => `<div class="mkcm-pack-block ${this.browserState.packId === pack.id ? "active" : ""}" data-pack-id="${escapeHtml(pack.id)}">
+      <div class="mkcm-pack-row ${this.browserState.packId === pack.id && !this.browserState.folderId ? "active" : ""}">
+        <button type="button" class="mkcm-pack-main" data-action="select-pack" title="Browse this pack">
+          <span class="mkcm-pack-title"><i class="fas fa-book"></i> ${escapeHtml(pack.title)}</span>
+          <span class="mkcm-pack-meta">${escapeHtml(pack.documentName)} · ${escapeHtml(pack.packageName)}${pack.locked ? " · locked" : ""}</span>
+        </button>
+        <div class="mkcm-row-tools">
+          <button type="button" data-action="view-pack" title="Open this compendium"><i class="fas fa-eye"></i></button>
+          ${this.canManageCompendiums ? `<button type="button" data-action="export-pack" title="Export this pack"><i class="fas fa-file-export"></i></button><button type="button" data-action="import-pack" title="Import JSON into this pack"><i class="fas fa-file-import"></i></button>` : ""}
         </div>
-        ${this.buildPackFolderTreeHtml(pack)}
-      </div>
-    `).join("");
+      </div>${this.buildPackFolderTreeHtml(pack)}</div>`).join("");
   }
 
   buildResultsHtml() {
     if (this.browserState.linkAuditActive && this.canManageCompendiums) return this.buildBrokenLinkResultsHtml();
     if (this.browserState.loading) return '<div class="mkcm-loading"><i class="fas fa-spinner fa-spin"></i> Loading compendium indexes...</div>';
-    if (!this.browserState.searched) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
-    if (!this.browserState.results.length) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
-
-    return this.browserState.results.map(entry => `
-      <div class="mkcm-result-row" draggable="true" data-pack-id="${escapeHtml(entry.packId)}" data-entry-id="${escapeHtml(entry.id)}" data-document-name="${escapeHtml(entry.documentName)}">
-        <div class="mkcm-result-image">
-          <img class="mkcm-result-img" src="${escapeHtml(entry.img)}" alt="" />
-        </div>
-        <div class="mkcm-result-main">
-          <div class="mkcm-result-title">${escapeHtml(entry.name)}</div>
-          <div class="mkcm-result-meta">
-            ${escapeHtml(entry.type)} · ${escapeHtml(entry.packTitle)}${entry.folderPath ? ` · ${escapeHtml(entry.folderPath)}` : ""}
-          </div>
-        </div>
-      </div>
-    `).join("");
+    if (!this.browserState.searched || !this.browserState.results.length) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
+    return this.browserState.results.map(entry => `<div class="mkcm-result-row" draggable="true" data-pack-id="${escapeHtml(entry.packId)}" data-entry-id="${escapeHtml(entry.id)}" data-document-name="${escapeHtml(entry.documentName)}">
+      <div class="mkcm-result-image"><img class="mkcm-result-img" src="${escapeHtml(entry.img)}" alt="" /></div>
+      <div class="mkcm-result-main"><div class="mkcm-result-title">${escapeHtml(entry.name)}</div><div class="mkcm-result-meta">${escapeHtml(entry.type)} · ${escapeHtml(entry.packTitle)}${entry.folderPath ? ` · ${escapeHtml(entry.folderPath)}` : ""}</div></div>
+    </div>`).join("");
   }
 
   buildBrokenLinkResultsHtml() {
     if (this.browserState.loading) return '<div class="mkcm-loading"><i class="fas fa-spinner fa-spin"></i> Checking item compendium UUID links in compendiums and world items...</div>';
     if (!this.browserState.linkResults?.length) return `<div class="mkcm-empty">${escapeHtml(this.browserState.message)}</div>`;
-
     return this.browserState.linkResults.map((link, index) => {
       const isWorldSource = link.sourceScope === "world";
       const pack = isWorldSource ? null : resolvePack(link.packId);
@@ -492,89 +414,42 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       const sourceGroupLabel = isWorldSource ? "Source" : "Pack";
       const folderLabel = isWorldSource ? "World Folder" : "Pack Folder";
       const openTitle = link.actorName ? "Open assigned actor" : "Open source item";
-
-      return `
-        <div class="mkcm-result-row mkcm-broken-link-row" data-source-scope="${escapeHtml(link.sourceScope ?? "compendium")}" data-pack-id="${escapeHtml(link.packId)}" data-entry-id="${escapeHtml(link.documentId)}" data-document-name="${escapeHtml(link.documentName)}" data-link-index="${index}">
-          <div class="mkcm-result-image">
-            <img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" />
+      return `<div class="mkcm-result-row mkcm-broken-link-row" data-source-scope="${escapeHtml(link.sourceScope ?? "compendium")}" data-pack-id="${escapeHtml(link.packId)}" data-entry-id="${escapeHtml(link.documentId)}" data-document-name="${escapeHtml(link.documentName)}" data-link-index="${index}">
+        <div class="mkcm-result-image"><img class="mkcm-result-img" src="${escapeHtml(link.sourceImg)}" alt="" /></div>
+        <div class="mkcm-result-main">
+          <div class="mkcm-broken-link-header"><div class="mkcm-broken-link-title"><i class="fas fa-unlink"></i> ${escapeHtml(link.itemName ?? link.sourceName)}</div><div class="mkcm-broken-link-badges"><span class="mkcm-broken-link-badge">${escapeHtml(link.itemType ?? link.sourceType ?? "Item")}</span><span class="mkcm-broken-link-badge">${escapeHtml(sourceKind)}</span></div></div>
+          <div class="mkcm-broken-link-target"><span>Missing target</span><code title="${escapeHtml(link.normalizedUuid)}">${escapeHtml(link.normalizedUuid)}</code></div>
+          <div class="mkcm-broken-link-details">
+            <div><span>Assigned Actor</span><strong title="${escapeHtml(link.actorUuid ?? "")}">${escapeHtml(assignedActor)}</strong></div>
+            <div><span>${sourceGroupLabel}</span><strong>${escapeHtml(link.packTitle)}</strong></div>
+            <div><span>${folderLabel}</span><strong>${escapeHtml(folderPath || "No folder")}</strong></div>
+            <div><span>Field</span><code title="${escapeHtml(link.pathLabel)}">${escapeHtml(link.pathLabel)}</code></div>
+            <div><span>Source UUID</span><code title="${escapeHtml(link.sourceUuid)}">${escapeHtml(link.sourceUuid)}</code></div>
+            <div><span>Reason</span><strong>${escapeHtml(link.reason ?? "Target document was not found.")}</strong></div>
           </div>
-          <div class="mkcm-result-main">
-            <div class="mkcm-broken-link-header">
-              <div class="mkcm-broken-link-title"><i class="fas fa-unlink"></i> ${escapeHtml(link.itemName ?? link.sourceName)}</div>
-              <div class="mkcm-broken-link-badges">
-                <span class="mkcm-broken-link-badge">${escapeHtml(link.itemType ?? link.sourceType ?? "Item")}</span>
-                <span class="mkcm-broken-link-badge">${escapeHtml(sourceKind)}</span>
-              </div>
-            </div>
-            <div class="mkcm-broken-link-target">
-              <span>Missing target</span>
-              <code title="${escapeHtml(link.normalizedUuid)}">${escapeHtml(link.normalizedUuid)}</code>
-            </div>
-            <div class="mkcm-broken-link-details">
-              <div><span>Assigned Actor</span><strong title="${escapeHtml(link.actorUuid ?? "")}">${escapeHtml(assignedActor)}</strong></div>
-              <div><span>${sourceGroupLabel}</span><strong>${escapeHtml(link.packTitle)}</strong></div>
-              <div><span>${folderLabel}</span><strong>${escapeHtml(folderPath || "No folder")}</strong></div>
-              <div><span>Field</span><code title="${escapeHtml(link.pathLabel)}">${escapeHtml(link.pathLabel)}</code></div>
-              <div><span>Source UUID</span><code title="${escapeHtml(link.sourceUuid)}">${escapeHtml(link.sourceUuid)}</code></div>
-              <div><span>Reason</span><strong>${escapeHtml(link.reason ?? "Target document was not found.")}</strong></div>
-            </div>
-          </div>
-          <div class="mkcm-row-tools">
-            <button type="button" data-action="open-source" title="${escapeHtml(openTitle)}"><i class="fas fa-eye"></i></button>
-          </div>
-        </div>
-      `;
+        </div><div class="mkcm-row-tools"><button type="button" data-action="open-source" title="${escapeHtml(openTitle)}"><i class="fas fa-eye"></i></button></div>
+      </div>`;
     }).join("");
   }
 
   buildHtml() {
     const canUseIconResults = !(this.browserState.linkAuditActive && this.canManageCompendiums);
     const resultsListClass = this.browserState.resultsView === "icons" && canUseIconResults ? " mkcm-results-icons" : "";
-
-    return `
-      <div class="mkcm-browser">
-        ${this.buildFiltersHtml()}
-        <div class="mkcm-browser-body">
-          <aside class="mkcm-browser-sidebar">
-            <section>
-              <h3>Compendium Packs</h3>
-              <div class="mkcm-pack-list">${this.buildPackListHtml()}</div>
-            </section>
-          </aside>
-          <main class="mkcm-browser-results">
-            <div class="mkcm-results-header">
-              <div class="mkcm-results-heading">
-                <strong>${this.browserState.linkAuditActive && this.canManageCompendiums ? "Broken Links" : "Results"}</strong>
-                <span class="mkcm-results-status">${escapeHtml(this.browserState.message)}</span>
-              </div>
-              ${canUseIconResults ? `
-                <label class="mkcm-results-view" title="Choose how search results are displayed">
-                  <i class="fas fa-table-cells-large" aria-hidden="true"></i>
-                  <span>View</span>
-                  <select name="resultsView" aria-label="Results display">
-                    <option value="list" ${this.browserState.resultsView === "list" ? "selected" : ""}>List</option>
-                    <option value="icons" ${this.browserState.resultsView === "icons" ? "selected" : ""}>Icons</option>
-                  </select>
-                </label>
-              ` : ""}
-            </div>
-            <div class="mkcm-results-list${resultsListClass}">${this.buildResultsHtml()}</div>
-          </main>
-        </div>
-      </div>
-    `;
+    return `<div class="mkcm-browser">${this.buildFiltersHtml()}<div class="mkcm-browser-body">
+      <aside class="mkcm-browser-sidebar"><section><h3>Compendium Packs</h3><div class="mkcm-pack-list">${this.buildPackListHtml()}</div></section></aside>
+      <main class="mkcm-browser-results"><div class="mkcm-results-header"><div class="mkcm-results-heading"><strong>${this.browserState.linkAuditActive && this.canManageCompendiums ? "Broken Links" : "Results"}</strong><span class="mkcm-results-status">${escapeHtml(this.browserState.message)}</span></div>
+        ${canUseIconResults ? `<label class="mkcm-results-view" title="Choose how search results are displayed"><i class="fas fa-table-cells-large" aria-hidden="true"></i><span>View</span><select name="resultsView" aria-label="Results display"><option value="list" ${this.browserState.resultsView === "list" ? "selected" : ""}>List</option><option value="icons" ${this.browserState.resultsView === "icons" ? "selected" : ""}>Icons</option></select></label>` : ""}
+      </div><div class="mkcm-results-list${resultsListClass}">${this.buildResultsHtml()}</div></main>
+    </div></div>`;
   }
 
   async runSingleBrowserAction(actionKey, button, callback) {
     if (this._busyActions.has(actionKey)) return null;
-
     this._busyActions.add(actionKey);
     const previousDisabled = button?.disabled ?? false;
     if (button) button.disabled = true;
-
-    try {
-      return await callback();
-    } finally {
+    try { return await callback(); }
+    finally {
       this._busyActions.delete(actionKey);
       if (button) button.disabled = previousDisabled;
     }
@@ -583,93 +458,62 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
   async openResultDocument(packIdOrPack, entryId) {
     const pack = resolvePack(packIdOrPack);
     if (!pack || !entryId) return;
-
-    try {
-      const doc = await pack.getDocument(entryId);
-      doc?.sheet?.render?.(true);
-    } catch (err) {
-      error("Failed to open compendium browser entry.", err);
-    }
+    try { (await pack.getDocument(entryId))?.sheet?.render?.(true); }
+    catch (err) { error("Failed to open compendium browser entry.", err); }
   }
 
   async openBrokenLinkSource(link) {
     if (!link) return;
-
     if (link.sourceScope === "world") {
-      const document = link.actorId
-        ? game.actors?.get?.(link.actorId)
-        : game.items?.get?.(link.documentId);
-
-      if (!document) {
-        warn("Broken link source document was not found.");
-        return;
-      }
-
+      const document = link.actorId ? game.actors?.get?.(link.actorId) : game.items?.get?.(link.documentId);
+      if (!document) { warn("Broken link source document was not found."); return; }
       document.sheet?.render?.(true);
       return;
     }
-
     await this.openResultDocument(link.packId, link.documentId);
   }
 
   activateBrowserListeners(root) {
     if (!root) return;
-
     this._listenerController?.abort();
     this._listenerController = new AbortController();
     const listenerOptions = { signal: this._listenerController.signal };
-
     this.restoreSidebarScroll(root, listenerOptions);
 
     root.querySelector('[data-action="search"]')?.addEventListener("click", async event => {
-      event.preventDefault();
-      readBrowserStateFromForm(root, this.browserState);
-      await this.runSearch();
+      event.preventDefault(); readBrowserStateFromForm(root, this.browserState); await this.runSearch();
     }, listenerOptions);
 
-    if (this.canManageCompendiums) {
-      root.querySelector('[data-action="check-links"]')?.addEventListener("click", async event => {
-        event.preventDefault();
-        readBrowserStateFromForm(root, this.browserState);
-        await this.runBrokenLinkCheck();
-      }, listenerOptions);
-    }
+    if (this.canManageCompendiums) root.querySelector('[data-action="check-links"]')?.addEventListener("click", async event => {
+      event.preventDefault(); readBrowserStateFromForm(root, this.browserState); await this.runBrokenLinkCheck();
+    }, listenerOptions);
 
     root.querySelector('[name="query"]')?.addEventListener("keydown", async event => {
       if (event.key !== "Enter") return;
-      event.preventDefault();
-      readBrowserStateFromForm(root, this.browserState);
-      await this.runSearch();
+      event.preventDefault(); readBrowserStateFromForm(root, this.browserState); await this.runSearch();
     }, listenerOptions);
 
-    for (const select of root.querySelectorAll("select")) {
-      select.addEventListener("change", async () => {
-        if (select.name === "resultsView") {
-          this.browserState.resultsView = select.value === "icons" ? "icons" : "list";
-          this.render(true);
-          return;
-        }
-
-        readBrowserStateFromForm(root, this.browserState);
-        if (["documentName", "packageName"].includes(select.name)) {
-          this.browserState.entryType = "";
-          this.browserState.packId = "";
-          this.browserState.folderId = "";
-        }
-        await this.runSearch();
-      }, listenerOptions);
-    }
+    for (const select of root.querySelectorAll("select")) select.addEventListener("change", async () => {
+      if (select.name === "resultsView") {
+        this.browserState.resultsView = select.value === "icons" ? "icons" : "list";
+        this.render(true);
+        return;
+      }
+      readBrowserStateFromForm(root, this.browserState);
+      if (["documentName", "packageName"].includes(select.name)) {
+        this.browserState.entryType = "";
+        this.browserState.packId = "";
+        this.browserState.folderId = "";
+      }
+      await this.runSearch();
+    }, listenerOptions);
 
     root.addEventListener("click", async event => {
       const button = event.target?.closest?.("button[data-action]");
       if (!button) return;
       const action = button.dataset.action;
-
       if (["search", "check-links"].includes(action)) return;
-
-      event.preventDefault();
-      event.stopPropagation();
-
+      event.preventDefault(); event.stopPropagation();
       const packRow = button.closest("[data-pack-id]");
       const resultRow = button.closest(".mkcm-result-row");
       const folderRow = button.closest("[data-folder-id]");
@@ -679,34 +523,18 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
       switch (action) {
         case "select-pack":
-          this.captureSidebarScroll(root);
-          this.browserState.packId = packId ?? "";
-          this.browserState.folderId = "";
-          await this.runSearch();
-          return;
+          this.captureSidebarScroll(root); this.browserState.packId = packId ?? ""; this.browserState.folderId = ""; await this.runSearch(); return;
         case "select-folder":
-          this.captureSidebarScroll(root);
-          this.browserState.packId = packId ?? this.browserState.packId ?? "";
-          this.browserState.folderId = folderId ?? "";
-          await this.runSearch();
-          return;
+          this.captureSidebarScroll(root); this.browserState.packId = packId ?? this.browserState.packId ?? ""; this.browserState.folderId = folderId ?? ""; await this.runSearch(); return;
         case "view-pack":
           if (!pack) return;
-          try {
-            if (getFoundryGeneration() >= 13) pack.render?.({ force: true });
-            else pack.render?.(true);
-          } catch (err) {
-            error("Failed to open compendium browser pack.", err);
-          }
+          try { pack.render?.({ force: true }); } catch (err) { error("Failed to open compendium browser pack.", err); }
           return;
         case "open-source":
           if (resultRow?.dataset?.linkIndex != null) {
             const linkIndex = Number.parseInt(resultRow.dataset.linkIndex ?? "", 10);
-            const link = Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null;
-            await this.openBrokenLinkSource(link);
-          } else {
-            await this.openResultDocument(pack, resultRow?.dataset?.entryId);
-          }
+            await this.openBrokenLinkSource(Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null);
+          } else await this.openResultDocument(pack, resultRow?.dataset?.entryId);
           return;
         case "export-pack":
           return this.runSingleBrowserAction(`export-pack:${packId ?? ""}`, button, async () => {
@@ -720,24 +548,15 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
     root.addEventListener("dblclick", async event => {
       const row = event.target?.closest?.(".mkcm-result-row");
-      if (row) {
-        event.preventDefault();
-        event.stopPropagation();
-
-        if (row.dataset.linkIndex != null) {
-          const linkIndex = Number.parseInt(row.dataset.linkIndex ?? "", 10);
-          const link = Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null;
-          await this.openBrokenLinkSource(link);
-          return;
-        }
-
-        const pack = resolvePack(row.dataset.packId);
-        const entryId = row.dataset.entryId;
-        if (!pack || !entryId) return;
-
-        await this.openResultDocument(pack, entryId);
+      if (!row) return;
+      event.preventDefault(); event.stopPropagation();
+      if (row.dataset.linkIndex != null) {
+        const linkIndex = Number.parseInt(row.dataset.linkIndex ?? "", 10);
+        await this.openBrokenLinkSource(Number.isInteger(linkIndex) ? this.browserState.linkResults?.[linkIndex] : null);
         return;
       }
+      const pack = resolvePack(row.dataset.packId);
+      if (pack && row.dataset.entryId) await this.openResultDocument(pack, row.dataset.entryId);
     }, listenerOptions);
 
     root.addEventListener("dragstart", event => {
@@ -746,20 +565,12 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       const pack = resolvePack(row.dataset.packId);
       const entryId = row.dataset.entryId;
       if (!pack || !entryId) return;
-      const data = {
-        type: pack.documentName ?? row.dataset.documentName ?? "Document",
-        uuid: `Compendium.${pack.collection}.${entryId}`
-      };
-      event.dataTransfer?.setData("text/plain", JSON.stringify(data));
+      event.dataTransfer?.setData("text/plain", JSON.stringify({ type: pack.documentName ?? row.dataset.documentName ?? "Document", uuid: `Compendium.${pack.collection}.${entryId}` }));
     }, listenerOptions);
   }
 }
 
 let mkCompendiumBrowserApp = null;
-
-function getFoundryGeneration() {
-  return Number(game.release?.generation ?? game.version?.split?.(".")?.[0] ?? 0);
-}
 
 function renderBrowserApplication(app) {
   try {
@@ -774,13 +585,10 @@ function renderBrowserApplication(app) {
 
 export function openCompendiumBrowser(options = {}) {
   if (!mkCompendiumBrowserApp) mkCompendiumBrowserApp = new MkCompendiumBrowser(options);
-  else {
-    Object.assign(mkCompendiumBrowserApp.browserState, {
-      packId: options.packId ?? mkCompendiumBrowserApp.browserState.packId,
-      folderId: options.folderId ?? mkCompendiumBrowserApp.browserState.folderId
-    });
-  }
-
+  else Object.assign(mkCompendiumBrowserApp.browserState, {
+    packId: options.packId ?? mkCompendiumBrowserApp.browserState.packId,
+    folderId: options.folderId ?? mkCompendiumBrowserApp.browserState.folderId
+  });
   renderBrowserApplication(mkCompendiumBrowserApp);
   return mkCompendiumBrowserApp;
 }

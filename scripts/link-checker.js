@@ -1,3 +1,4 @@
+import { waitFormDialog } from './dialogs.js';
 import {
   collectionValues,
   deepClone,
@@ -33,7 +34,6 @@ function stripTrailingReferencePunctuation(value) {
 function getPackIdFromLegacyCompendiumUuid(value) {
   const parts = String(value ?? "").split(".");
   if (parts.length < 3) return null;
-
   const packId = `${parts[0]}.${parts[1]}`;
   return game.packs?.get?.(packId) ? packId : null;
 }
@@ -56,6 +56,7 @@ function getEmbeddedDocumentsByName(source, documentName) {
   const collectionKeys = {
     ActiveEffect: "effects",
     AmbientLight: "lights",
+    Card: "cards",
     Combatant: "combatants",
     Drawing: "drawings",
     Item: "items",
@@ -68,6 +69,7 @@ function getEmbeddedDocumentsByName(source, documentName) {
     TableResult: "results",
     Tile: "tiles",
     Token: "tokens",
+    TokenDocument: "tokens",
     Wall: "walls"
   };
   const key = collectionKeys[documentName] ?? `${String(documentName ?? "").toLocaleLowerCase()}s`;
@@ -250,18 +252,12 @@ function getUpdatePath(path) {
 function addReference(references, seen, data) {
   const rawUuid = String(data.rawUuid ?? "").trim();
   const normalizedUuid = normalizeReferenceUuid(rawUuid, { legacyCompendium: data.syntax === "inline-compendium" });
-
   if (!rawUuid || !isPotentialCompendiumUuid(normalizedUuid)) return;
 
   const key = `${data.pathLabel}|${data.syntax}|${rawUuid}|${data.start ?? 0}`;
   if (seen.has(key)) return;
   seen.add(key);
-
-  references.push({
-    ...data,
-    rawUuid,
-    normalizedUuid
-  });
+  references.push({ ...data, rawUuid, normalizedUuid });
 }
 
 function extractReferencesFromString(value, path) {
@@ -350,7 +346,6 @@ function shouldSkipPath(path) {
   const isFlagsPath = pathPartEquals(path[0], "flags");
   if (isFlagsPath && pathPartEquals(path[1], "scene-packer")) return true;
   if (isFlagsPath && pathPartEquals(path[1], "core") && pathPartEquals(path[path.length - 1], "sourceid")) return true;
-
   return false;
 }
 
@@ -360,21 +355,17 @@ export function findUuidReferencesInSource(source) {
 
   const walk = (value, path = []) => {
     if (value == null || shouldSkipPath(path)) return;
-
     if (typeof value === "string") {
       references.push(...extractReferencesFromString(value, path));
       return;
     }
-
     if (Array.isArray(value)) {
       value.forEach((entry, index) => walk(entry, [...path, index]));
       return;
     }
-
     if (typeof value === "object") {
       if (seenObjects.has(value)) return;
       seenObjects.add(value);
-
       for (const [key, child] of Object.entries(value)) walk(child, [...path, key]);
     }
   };
@@ -397,19 +388,28 @@ async function resolveCompendiumUuidFromIndex(uuid) {
   const documentId = remainder.shift();
   if (!documentId) return { found: false, reason: "Target document ID is missing." };
 
-  const sources = await getRawCompendiumIndex(pack);
+  let degraded = false;
+  const sources = await getRawCompendiumIndex(pack, {
+    linkAudit: true,
+    onFallback: () => { degraded = true; }
+  });
   let source = sources.find(entry => documentIdOf(entry) === documentId);
-  if (!source) return { found: false, reason: "Target document was not found." };
+  if (!source) return { found: false, reason: "Target document was not found.", degraded };
 
   while (remainder.length >= 2) {
     const embeddedName = remainder.shift();
     const embeddedId = remainder.shift();
     source = getEmbeddedDocumentsByName(source, embeddedName).find(entry => documentIdOf(entry) === embeddedId);
-    if (!source) return { found: false, reason: `Target embedded ${embeddedName} was not found.` };
+    if (!source) {
+      const reason = degraded
+        ? `Target embedded ${embeddedName} could not be verified because this pack only returned a basic index.`
+        : `Target embedded ${embeddedName} was not found.`;
+      return { found: false, reason, degraded };
+    }
   }
 
-  if (remainder.length) return { found: false, reason: "Target UUID has an incomplete embedded document path." };
-  return { found: true };
+  if (remainder.length) return { found: false, reason: "Target UUID has an incomplete embedded document path.", degraded };
+  return { found: true, degraded };
 }
 
 async function resolveUuid(uuid, cache) {
@@ -483,6 +483,7 @@ async function collectBrokenLinksForItemContext({
       sourceImg: itemImg,
       sourceUuid,
       reason: resolution.reason,
+      resolutionDegraded: resolution.degraded === true,
       ...reference,
       path: fullPath,
       pathLabel: fullPathLabel,
@@ -508,15 +509,21 @@ export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null,
   const brokenLinks = [];
 
   for (const pack of packs ?? []) {
-    if (!pack?.getIndex) continue;
-    if (!packCanContainItems(pack)) continue;
+    if (!pack?.getIndex || !packCanContainItems(pack)) continue;
 
     let documents = [];
+    let degraded = false;
     try {
-      documents = await getRawCompendiumIndex(pack);
+      documents = await getRawCompendiumIndex(pack, {
+        linkAudit: true,
+        onFallback: err => {
+          degraded = true;
+          console.warn(`MK-Compendiums | ${getPackTitle(pack)} rejected the deep link-audit index. Falling back to the basic index.`, err);
+        }
+      });
     } catch (err) {
-      console.warn(`MK-Compendiums | Could not load raw index data for link check in ${getPackTitle(pack)}.`, err);
-      onPackScanned?.(pack, { failed: true });
+      console.warn(`MK-Compendiums | Could not load index data for link check in ${getPackTitle(pack)}.`, err);
+      onPackScanned?.(pack, { failed: true, degraded: false });
       continue;
     }
 
@@ -541,7 +548,7 @@ export async function findBrokenLinksInPacks(packs, { shouldScanDocument = null,
       }
     }
 
-    onPackScanned?.(pack, { failed: false });
+    onPackScanned?.(pack, { failed: false, degraded });
   }
 
   return sortBrokenLinks(brokenLinks);
@@ -552,15 +559,10 @@ export async function findBrokenLinksInWorld({ includeItems = true, includeActor
   const worldDocuments = [];
 
   if (includeItems) {
-    for (const document of collectionValues(game.items)) {
-      worldDocuments.push({ document, documentName: "Item", worldCollection: "World Items" });
-    }
+    for (const document of collectionValues(game.items)) worldDocuments.push({ document, documentName: "Item", worldCollection: "World Items" });
   }
-
   if (includeActors) {
-    for (const document of collectionValues(game.actors)) {
-      worldDocuments.push({ document, documentName: "Actor", worldCollection: "World Actors" });
-    }
+    for (const document of collectionValues(game.actors)) worldDocuments.push({ document, documentName: "Actor", worldCollection: "World Actors" });
   }
 
   for (const { document, documentName, worldCollection } of worldDocuments) {
@@ -603,7 +605,6 @@ function replaceInlineCompendium(text, rawUuid, replacementUuid) {
 function replaceDirectUuid(text, rawUuid, normalizedUuid, replacementUuid) {
   const exact = text.trim();
   if (exact === rawUuid || exact === normalizedUuid) return replacementUuid;
-
   let next = text.replaceAll(rawUuid, replacementUuid);
   if (normalizedUuid !== rawUuid) next = next.replaceAll(normalizedUuid, replacementUuid);
   return next;
@@ -618,7 +619,6 @@ function clearInlineReference(text, syntax, rawUuid) {
 function clearDirectUuid(text, rawUuid, normalizedUuid) {
   const exact = text.trim();
   if (exact === rawUuid || exact === normalizedUuid) return "";
-
   let next = text.replaceAll(rawUuid, "");
   if (normalizedUuid !== rawUuid) next = next.replaceAll(normalizedUuid, "");
   return next.replace(/\s{2,}/g, " ").trim();
@@ -626,12 +626,10 @@ function clearDirectUuid(text, rawUuid, normalizedUuid) {
 
 function getFixedStringValue(currentValue, link, { replacementUuid = "", clear = false } = {}) {
   const text = String(currentValue ?? "");
-
   if (clear) {
-    if (link.syntax === "inline-uuid" || link.syntax === "inline-compendium") return clearInlineReference(text, link.syntax, link.rawUuid);
+    if (["inline-uuid", "inline-compendium"].includes(link.syntax)) return clearInlineReference(text, link.syntax, link.rawUuid);
     return clearDirectUuid(text, link.rawUuid, link.normalizedUuid);
   }
-
   if (link.syntax === "inline-uuid") return replaceInlineUuid(text, link.rawUuid, replacementUuid);
   if (link.syntax === "inline-compendium") return replaceInlineCompendium(text, link.rawUuid, replacementUuid);
   return replaceDirectUuid(text, link.rawUuid, link.normalizedUuid, replacementUuid);
@@ -651,7 +649,6 @@ async function validateReplacementUuid(replacementUuid, { clear = false } = {}) 
     warn(`Replacement compendium UUID could not be resolved: ${normalizedReplacement}`);
     return null;
   }
-
   return normalizedReplacement;
 }
 
@@ -661,19 +658,13 @@ async function applyWorldBrokenLinkFix(link, { replacementUuid = "", clear = fal
 
   try {
     const isEmbeddedItem = !!link.actorId;
-    const document = isEmbeddedItem
-      ? game.actors?.get?.(link.actorId)
-      : game.items?.get?.(link.documentId);
-
+    const document = isEmbeddedItem ? game.actors?.get?.(link.actorId) : game.items?.get?.(link.documentId);
     if (!document) {
       warn(isEmbeddedItem ? "Assigned actor not found." : "Source world item not found.");
       return null;
     }
 
-    const itemDocument = isEmbeddedItem
-      ? document.items?.get?.(link.itemId)
-      : document;
-
+    const itemDocument = isEmbeddedItem ? document.items?.get?.(link.itemId) : document;
     if (!itemDocument) {
       warn("Source item not found.");
       return null;
@@ -687,11 +678,7 @@ async function applyWorldBrokenLinkFix(link, { replacementUuid = "", clear = fal
       return null;
     }
 
-    const nextValue = getFixedStringValue(currentValue, link, {
-      replacementUuid: normalizedReplacement,
-      clear
-    });
-
+    const nextValue = getFixedStringValue(currentValue, link, { replacementUuid: normalizedReplacement, clear });
     if (nextValue === currentValue) {
       warn("No matching broken compendium UUID was found at that path. Re-run the link check and try again.");
       return null;
@@ -699,14 +686,12 @@ async function applyWorldBrokenLinkFix(link, { replacementUuid = "", clear = fal
 
     const updatePath = getUpdatePath(referencePath);
     let updateData = isEmbeddedItem ? { _id: link.itemId } : {};
-
     if (updatePath) updateData[updatePath] = nextValue;
     else {
       if (!setValueAtPath(source, referencePath, nextValue)) {
         warn("Could not update the broken compendium UUID path.");
         return null;
       }
-
       source._id = link.itemId;
       updateData = source;
       if (!isEmbeddedItem) delete updateData._id;
@@ -737,7 +722,6 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
     warn("Only the GM can fix compendium links.");
     return null;
   }
-
   if (link?.sourceScope === "world") return applyWorldBrokenLinkFix(link, { replacementUuid, clear });
 
   const pack = resolvePack(link?.packId);
@@ -748,7 +732,6 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
 
   const normalizedReplacement = await validateReplacementUuid(replacementUuid, { clear });
   if (normalizedReplacement === null) return null;
-
   if (!await ensurePackWritable(pack)) return null;
 
   try {
@@ -765,11 +748,7 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
       return null;
     }
 
-    const nextValue = getFixedStringValue(currentValue, link, {
-      replacementUuid: normalizedReplacement,
-      clear
-    });
-
+    const nextValue = getFixedStringValue(currentValue, link, { replacementUuid: normalizedReplacement, clear });
     if (nextValue === currentValue) {
       warn("No matching broken compendium UUID was found at that path. Re-run the link check and try again.");
       return null;
@@ -780,22 +759,20 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
 
     const updatePath = getUpdatePath(link.path);
     let updateData = { _id: link.documentId };
-
     if (updatePath) updateData[updatePath] = nextValue;
     else {
       if (!setValueAtPath(source, link.path, nextValue)) {
         warn("Could not update the broken compendium UUID path.");
         return null;
       }
-
       source._id = link.documentId;
       updateData = source;
     }
 
     await documentClass.updateDocuments([updateData], { pack: pack.collection });
     resetCompendiumIndexCache(pack);
-    pack.render?.(false);
-    ui.compendium?.render?.(false);
+    pack.render?.({ force: false });
+    ui.compendium?.render?.({ force: false });
 
     const action = clear ? "cleared" : "replaced";
     notifyInfo(`Broken compendium UUID ${action} in ${link.sourceName}.`);
@@ -830,7 +807,10 @@ export function getBrokenLinkFixDialogContent(link) {
         <label>Replacement compendium UUID</label>
         <input type="text" name="replacementUuid" value="" placeholder="Compendium.package.pack.documentId" autocomplete="off" />
       </div>
-      <p class="notes">Replace validates that the target exists in a compendium before updating the item. Clear removes this broken link from the field.</p>
+      <div class="form-group">
+        <label><input type="checkbox" name="clearLink" /> Clear the broken link instead of replacing it</label>
+      </div>
+      <p class="notes">Replacement UUIDs are resolved before any update is written. Locked compendiums must be unlocked explicitly before using the fixer.</p>
     </form>
   `;
 }
@@ -838,42 +818,21 @@ export function getBrokenLinkFixDialogContent(link) {
 export async function openBrokenLinkFixDialog(link) {
   if (!link) return null;
 
-  const DialogClass = globalThis.Dialog;
-  if (!DialogClass) {
-    warn("The Foundry dialog API is not available.");
-    return null;
-  }
-
-  return new Promise(resolve => {
-    new DialogClass({
-      title: "Fix Broken Compendium UUID",
-      content: getBrokenLinkFixDialogContent(link),
-      buttons: {
-        replace: {
-          icon: '<i class="fas fa-wrench"></i>',
-          label: "Replace",
-          callback: async html => {
-            const root = html?.[0] ?? html;
-            const form = root?.querySelector?.("form") ?? root;
-            const replacementUuid = form?.querySelector?.('[name="replacementUuid"]')?.value ?? "";
-            resolve(await applyBrokenLinkFix(link, { replacementUuid }));
-          }
-        },
-        clear: {
-          icon: '<i class="fas fa-eraser"></i>',
-          label: "Clear Link",
-          callback: async () => {
-            resolve(await applyBrokenLinkFix(link, { clear: true }));
-          }
-        },
-        cancel: {
-          icon: '<i class="fas fa-times"></i>',
-          label: "Cancel",
-          callback: () => resolve(null)
-        }
-      },
-      default: "replace",
-      close: () => resolve(null)
-    }).render(true);
+  const formResult = await waitFormDialog({
+    title: "Fix Broken Compendium UUID",
+    content: getBrokenLinkFixDialogContent(link),
+    submitLabel: "Apply Fix",
+    submitIcon: "fa-solid fa-wrench",
+    getResult: form => {
+      if (!form) return null;
+      const data = new FormData(form);
+      return {
+        replacementUuid: String(data.get("replacementUuid") ?? ""),
+        clear: data.get("clearLink") === "on"
+      };
+    }
   });
+
+  if (!formResult) return null;
+  return applyBrokenLinkFix(link, formResult);
 }
