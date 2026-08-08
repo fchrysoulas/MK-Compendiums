@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.4.1
+
+- Filtered player-facing browser packs through Foundry's current-user compendium visibility state so hidden packs are no longer exposed by the custom browser.
+- Reworked browser indexing to use lightweight indexes for browsing and document-type-specific deep fields only when description/text search is needed.
+- Added bounded parallel pack indexing and explicit reporting when a pack falls back to a basic index.
+- Reworked broken-link checks to request focused link-audit index fields and report degraded/basic-index scans instead of silently treating them as complete.
+- Added Foundry data-model preflight validation before compendium import writes begin.
+- Stopped silently unlocking locked compendiums. Imports now require explicit unlock confirmation and restore the original lock afterward.
+- Added warnings before modifying system/module-owned compendium packs.
+- Hardened Replace mode with an automatic downloadable recovery JSON before deletion and an automatic rollback attempt if the restore fails.
+- Made folder-import failure fatal during Replace mode so a failed folder restore triggers rollback instead of continuing with folderless documents.
+- Added shared multi-pack reference planning so directory-folder imports can rewrite cross-pack `Compendium.*` references when target pack or root document IDs change.
+- Changed Compendium Directory folder pack discovery to prefer Foundry collection/folder data, with DOM inspection retained only as a compatibility fallback.
+- Migrated import/export and broken-link fix dialogs to DialogV2 with a legacy fallback.
+- Moved browser styling from injected JavaScript into a normal module stylesheet.
+- Removed the duplicated hardcoded module version from runtime constants; runtime metadata now reads the installed version from Foundry's module registry.
+- Removed the stale README reference to the removed Refresh button and documented the new safety behavior.
+
 ## 1.4.0
 
 - Added a results-view combobox for switching normal compendium search results between list and icon-grid layouts.

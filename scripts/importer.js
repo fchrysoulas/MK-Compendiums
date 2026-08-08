@@ -1,4 +1,6 @@
-import { MODULE_ID, MODULE_VERSION } from './constants.js';
+import { MODULE_ID, getModuleVersion } from './constants.js';
+import { confirmDialog, waitFormDialog } from './dialogs.js';
+import { buildExportPayload, saveExportPayload } from './exporter.js';
 import {
   buildDocumentIdMap,
   cleanDocumentData,
@@ -12,28 +14,114 @@ import {
   getCompendiumCollectionClass,
   getDirectoryFolderDataFromElement,
   getDocumentClassForPack,
+  getDocumentSource,
   getFolderDocumentClass,
   getFolderName,
   getPackCreateOptions,
   getPackFolderIds,
+  getPackFoldersSource,
   getPackIdsFromDirectoryFolderElement,
   getPackIndexIds,
+  getPackPackageName,
   normalizeFolderReference,
   normalizeImportPayload,
   normalizeDirectoryImportPayload,
   notifyInfo,
   resolveFolderInPack,
   resolvePack,
+  rewriteCompendiumReferences,
   rewriteDocumentReferences,
   runBatched,
-  ensurePackWritable,
   warn
 } from './utils.js';
+
+function getPackPackageType(pack) {
+  const explicit = String(pack?.metadata?.packageType ?? "").toLowerCase();
+  if (explicit) return explicit;
+  const packageName = getPackPackageName(pack);
+  return packageName === "world" ? "world" : "package";
+}
+
+function isWorldPack(pack) {
+  return getPackPackageType(pack) === "world" || getPackPackageName(pack) === "world";
+}
+
+async function beginPackWriteSession(pack, { packageWriteConfirmed = false, unlockConfirmed = false } = {}) {
+  const packageOwned = !isWorldPack(pack);
+  const packageName = getPackPackageName(pack);
+
+  if (packageOwned && !packageWriteConfirmed) {
+    const approved = await confirmDialog({
+      title: "Modify Package Compendium?",
+      content: `
+        <p><strong>${escapeHtml(pack.title ?? pack.collection)}</strong> belongs to package <strong>${escapeHtml(packageName)}</strong>, not to this world.</p>
+        <p>Changes to system or module compendiums can be overwritten when that package updates.</p>
+        <p>Continue with this import?</p>
+      `,
+      yesLabel: "Continue",
+      noLabel: "Cancel",
+      yesIcon: "fa-solid fa-triangle-exclamation",
+      defaultYes: false
+    });
+    if (!approved) return null;
+  }
+
+  const session = {
+    originalLocked: !!pack.locked,
+    unlockedByModule: false
+  };
+
+  if (pack.locked) {
+    if (!unlockConfirmed) {
+      const approved = await confirmDialog({
+        title: "Temporarily Unlock Compendium?",
+        content: `
+          <p><strong>${escapeHtml(pack.title ?? pack.collection)}</strong> is locked.</p>
+          <p>MK-Compendiums can temporarily unlock it for this import and restore the lock afterward.</p>
+        `,
+        yesLabel: "Unlock & Import",
+        noLabel: "Cancel",
+        yesIcon: "fa-solid fa-lock-open",
+        defaultYes: false
+      });
+      if (!approved) return null;
+    }
+
+    if (typeof pack.configure !== "function") {
+      warn(`The compendium "${pack.title}" is locked and cannot be unlocked by this Foundry version.`);
+      return null;
+    }
+
+    try {
+      await pack.configure({ locked: false });
+    } catch (err) {
+      console.warn(`${MODULE_ID} v${getModuleVersion()} | Could not unlock compendium`, err);
+    }
+
+    if (pack.locked) {
+      warn(`The compendium "${pack.title}" could not be unlocked. Import cancelled.`);
+      return null;
+    }
+
+    session.unlockedByModule = true;
+  }
+
+  return session;
+}
+
+async function restorePackWriteSession(pack, session) {
+  if (!session?.originalLocked || !session.unlockedByModule || pack?.locked || typeof pack?.configure !== "function") return;
+  try {
+    await pack.configure({ locked: true });
+  } catch (err) {
+    console.warn(`${MODULE_ID} v${getModuleVersion()} | Could not restore compendium lock`, err);
+    warn(`Import finished, but MK-Compendiums could not re-lock "${pack.title}". Re-lock it manually.`);
+  }
+}
 
 export async function deleteExistingPackDocuments(pack, documentClass) {
   const existingIds = Array.from(await getPackIndexIds(pack));
   if (!existingIds.length) return [];
-
   return runBatched(existingIds, batch => documentClass.deleteDocuments(batch, { pack: pack.collection }));
 }
 
@@ -43,7 +131,6 @@ export async function deleteExistingPackFolders(pack) {
 
   const existingFolderIds = Array.from(getPackFolderIds(pack));
   if (!existingFolderIds.length) return [];
-
   return runBatched(existingFolderIds, batch => folderClass.deleteDocuments(batch, { pack: pack.collection }));
 }
 
@@ -51,7 +138,7 @@ export function prepareFolderQueue(folders, pack, { preserveIds = true } = {}) {
   const byOldId = new Map();
   const withoutIds = [];
 
-  for (const folder of folders) {
+  for (const folder of folders ?? []) {
     const oldId = documentIdOf(folder);
     const data = cleanFolderData(folder, pack, { preserveIds });
     const parentOldId = normalizeFolderReference(folder?.folder ?? data.folder);
@@ -78,7 +165,6 @@ export function prepareFolderQueue(folders, pack, { preserveIds = true } = {}) {
     }
 
     if (!moved) {
-      // Broken or circular parent references. Add the remaining folders without their parent.
       for (const [oldId, prepared] of Array.from(pending.entries())) {
         prepared.parentOldId = null;
         prepared.data.folder = null;
@@ -96,9 +182,7 @@ export async function importFoldersToPack(pack, folders, { mode = "upsert", pres
   const idMap = new Map();
   const targetId = normalizeFolderReference(targetFolderId);
 
-  if (!folders?.length) {
-    return { created: 0, updated: 0, deleted: 0, skipped: 0, idMap };
-  }
+  if (!folders?.length) return { created: 0, updated: 0, deleted: 0, skipped: 0, idMap };
 
   const folderClass = getFolderDocumentClass();
   if (!folderClass?.createDocuments) throw new Error("Folder document class is not available.");
@@ -170,6 +254,108 @@ export function rewriteEntryFolderReference(entry, folderIdMap, { preserveFolder
   return data;
 }
 
+function prepareEntrySources(rawEntries, {
+  preserveIds,
+  preserveFolders,
+  targetFolderId,
+  documentIdMap,
+  folderIdMap = new Map(),
+  referencePlan = []
+} = {}) {
+  return (rawEntries ?? []).map(entry => {
+    const oldDocumentId = documentIdOf(entry);
+    const mappedDocumentId = oldDocumentId ? documentIdMap.get(oldDocumentId) : null;
+    const cleaned = cleanDocumentData(entry, { preserveIds, preserveFolders });
+
+    if (mappedDocumentId) cleaned._id = mappedDocumentId;
+
+    const withFolder = rewriteEntryFolderReference(cleaned, folderIdMap, { preserveFolders, targetFolderId });
+    // Rewrite fully-qualified compendium references first so an ID collision in a
+    // different pack cannot be mistaken for a same-pack document reference.
+    const withGlobalCompendiumReferences = rewriteCompendiumReferences(withFolder, referencePlan);
+    return rewriteDocumentReferences(withGlobalCompendiumReferences, documentIdMap);
+  });
+}
+
+function preflightModelSource(modelClass, source, context, label) {
+  if (!modelClass || !source) return;
+
+  try {
+    if (typeof modelClass.fromSource === "function") {
+      const model = modelClass.fromSource(deepClone(source), { ...context, strict: true });
+      model?.validate?.({ strict: true });
+      return;
+    }
+
+    const model = new modelClass(deepClone(source), context);
+    model?.validate?.({ strict: true });
+  } catch (err) {
+    throw new Error(`${label} failed Foundry data validation: ${err?.message ?? err}`, { cause: err });
+  }
+}
+
+function preflightImportSources(pack, documentClass, entries, folders, { preserveFolderIds = true } = {}) {
+  const context = { pack: pack.collection };
+  const folderClass = getFolderDocumentClass();
+
+  for (const folder of folders ?? []) {
+    const source = cleanFolderData(folder, pack, { preserveIds: preserveFolderIds });
+    preflightModelSource(folderClass, source, context, `Folder "${getFolderName(folder)}"`);
+  }
+
+  for (const entry of entries ?? []) {
+    const label = entry?.name ?? documentIdOf(entry) ?? "Unnamed document";
+    preflightModelSource(documentClass, entry, context, `Document "${label}"`);
+  }
+}
+
+async function capturePackRecoverySnapshot(pack) {
+  const documents = await pack.getDocuments();
+  const entries = documents.map(getDocumentSource).filter(Boolean);
+  const folders = getPackFoldersSource(pack);
+  const payload = buildExportPayload(pack, entries, folders, { scope: "pre-replace-recovery" });
+  const filename = saveExportPayload(payload, pack, { prefix: "pre-replace-recovery" });
+  return { entries, folders, payload, filename };
+}
+
+function cleanRecoveryDocumentData(input) {
+  const data = deepClone(input);
+  delete data._key;
+  delete data.pack;
+  delete data.compendium;
+  delete data.uuid;
+  if (!data._id && data.id) data._id = data.id;
+  delete data.id;
+  data.folder = normalizeFolderReference(data.folder);
+  return data;
+}
+
+async function restorePackRecoverySnapshot(pack, snapshot, documentClass) {
+  if (!snapshot) return false;
+
+  try {
+    await deleteExistingPackDocuments(pack, documentClass);
+    await deleteExistingPackFolders(pack);
+
+    if (snapshot.folders?.length) {
+      await importFoldersToPack(pack, snapshot.folders, { mode: "upsert", preserveIds: true });
+    }
+
+    const entries = (snapshot.entries ?? []).map(cleanRecoveryDocumentData);
+    if (entries.length) {
+      await runBatched(entries, batch => documentClass.createDocuments(batch, getPackCreateOptions(pack, { keepId: true })));
+    }
+
+    await pack.getIndex();
+    notifyInfo(`Restored "${pack.title}" from the automatic pre-replace recovery snapshot.`);
+    return true;
+  } catch (rollbackError) {
+    console.error(`${MODULE_ID} v${getModuleVersion()} | Automatic rollback failed`, rollbackError);
+    error(`Import failed and automatic rollback also failed for "${pack.title}". Use the downloaded recovery JSON to restore it manually.`, rollbackError);
+    return false;
+  }
+}
+
 export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, options = {}) {
   const pack = resolvePack(packIdOrPack);
 
@@ -201,10 +387,14 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
     return null;
   }
 
-  if (!await ensurePackWritable(pack)) return null;
+  let payload;
+  let documentClass;
+  let rawEntries;
+  let documentIdMap;
+  let preflightEntries;
 
   try {
-    const payload = normalizeImportPayload(jsonTextOrPayload);
+    payload = normalizeImportPayload(jsonTextOrPayload);
     const exportedDocumentName = payload.pack?.documentName ?? null;
     const targetDocumentName = pack.documentName ?? pack.metadata?.type ?? null;
 
@@ -213,24 +403,51 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
       return null;
     }
 
-    const documentClass = getDocumentClassForPack(pack);
+    documentClass = getDocumentClassForPack(pack);
     if (!documentClass?.createDocuments) throw new Error(`Could not resolve document class for pack type ${targetDocumentName}.`);
 
-    const rawEntries = payload.entries ?? [];
+    rawEntries = payload.entries ?? [];
     if (!rawEntries.length) {
       warn("The JSON file contains no entries to import.");
       return null;
     }
 
+    documentIdMap = options.documentIdMap instanceof Map
+      ? options.documentIdMap
+      : buildDocumentIdMap(rawEntries, { preserveIds });
+
+    preflightEntries = prepareEntrySources(rawEntries, {
+      preserveIds,
+      preserveFolders,
+      targetFolderId,
+      documentIdMap,
+      referencePlan: options.referencePlan ?? []
+    });
+
+    preflightImportSources(pack, documentClass, preflightEntries, preserveFolders ? payload.folders : [], { preserveFolderIds });
+  } catch (err) {
+    error(`Import preflight failed for "${pack.title ?? pack.collection ?? "unknown"}". No compendium data was changed.`, err);
+    return null;
+  }
+
+  const writeSession = await beginPackWriteSession(pack, options);
+  if (!writeSession) return null;
+
+  let recoverySnapshot = null;
+  let replaceDeletionStarted = false;
+
+  try {
     const targetDescription = targetFolder ? ` folder "${getFolderName(targetFolder)}" in ${pack.title}` : ` ${pack.title}`;
     notifyInfo(`Importing ${rawEntries.length} documents into${targetDescription}.`);
-
-    const documentIdMap = buildDocumentIdMap(rawEntries, { preserveIds });
 
     let folderStats = { created: 0, updated: 0, deleted: 0, skipped: 0, idMap: new Map() };
     let preDeletedFolderCount = 0;
 
     if (mode === "replace") {
+      recoverySnapshot = await capturePackRecoverySnapshot(pack);
+      notifyInfo(`Saved automatic recovery backup before replacing "${pack.title}".`);
+
+      replaceDeletionStarted = true;
       const deleted = await deleteExistingPackDocuments(pack, documentClass);
       preDeletedFolderCount = (await deleteExistingPackFolders(pack)).length;
       notifyInfo(`Deleted ${deleted.length} existing documents and ${preDeletedFolderCount} folders from ${pack.title}.`);
@@ -245,21 +462,20 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
         });
         folderStats.deleted += preDeletedFolderCount;
       } catch (err) {
+        if (mode === "replace") throw err;
         preserveFolders = false;
-        console.warn(`${MODULE_ID} v${MODULE_VERSION} | Folder import failed. Documents will be imported without folder assignments.`, err);
+        console.warn(`${MODULE_ID} v${getModuleVersion()} | Folder import failed. Documents will be imported without folder assignments.`, err);
         warn("Folder import failed. Documents will be imported without folder assignments.");
       }
     }
 
-    const cleanedEntries = rawEntries.map(entry => {
-      const oldDocumentId = documentIdOf(entry);
-      const mappedDocumentId = oldDocumentId ? documentIdMap.get(oldDocumentId) : null;
-      const cleaned = cleanDocumentData(entry, { preserveIds, preserveFolders });
-
-      if (mappedDocumentId) cleaned._id = mappedDocumentId;
-
-      const withFolder = rewriteEntryFolderReference(cleaned, folderStats.idMap, { preserveFolders, targetFolderId });
-      return rewriteDocumentReferences(withFolder, documentIdMap);
+    const cleanedEntries = prepareEntrySources(rawEntries, {
+      preserveIds,
+      preserveFolders,
+      targetFolderId,
+      documentIdMap,
+      folderIdMap: folderStats.idMap,
+      referencePlan: options.referencePlan ?? []
     });
 
     let created = [];
@@ -290,8 +506,8 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
     }
 
     await pack.getIndex();
-    pack.render?.(false);
-    ui.compendium?.render?.(false);
+    pack.render?.({ force: false });
+    ui.compendium?.render?.({ force: false });
 
     const result = {
       pack: pack.collection,
@@ -301,8 +517,10 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
       created: created.length,
       updated: updated.length,
       skipped,
+      recoveryBackup: recoverySnapshot?.filename ?? null,
       references: {
-        remappedDocumentIds: Array.from(documentIdMap.entries()).filter(([oldId, newId]) => oldId && newId && oldId !== newId).length
+        remappedDocumentIds: Array.from(documentIdMap.entries()).filter(([oldId, newId]) => oldId && newId && oldId !== newId).length,
+        crossPackPlanSize: options.referencePlan?.length ?? 0
       },
       folders: {
         created: folderStats.created,
@@ -315,19 +533,22 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
     notifyInfo(`Import complete: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped. Folders: ${result.folders.created} created, ${result.folders.updated} updated. References remapped: ${result.references.remappedDocumentIds}.`);
     return result;
   } catch (err) {
+    if (mode === "replace" && replaceDeletionStarted && recoverySnapshot) {
+      warn(`Replace import failed for "${pack.title}". Attempting automatic rollback.`);
+      await restorePackRecoverySnapshot(pack, recoverySnapshot, documentClass);
+    }
+
     error(`Failed to import into compendium: ${pack.title ?? pack.collection ?? "unknown"}`, err);
     return null;
+  } finally {
+    await restorePackWriteSession(pack, writeSession);
   }
 }
 
 export function getImportDialogContent(pack, { targetFolder = null } = {}) {
   const targetPackName = escapeHtml(pack.title ?? pack.collection);
-  const folderNote = targetFolder
-    ? `<p><strong>Target folder:</strong> ${escapeHtml(getFolderName(targetFolder))}</p>`
-    : "";
-  const replaceOption = targetFolder
-    ? ""
-    : '<option value="replace">Replace pack - delete target entries first</option>';
+  const folderNote = targetFolder ? `<p><strong>Target folder:</strong> ${escapeHtml(getFolderName(targetFolder))}</p>` : "";
+  const replaceOption = targetFolder ? "" : '<option value="replace">Replace pack - backup, delete, then restore from JSON</option>';
   const folderHelp = targetFolder
     ? "Imported root folders will be placed under the selected target folder. Folderless documents will also be placed in the target folder."
     : "Preserve exported folder structure when possible.";
@@ -350,19 +571,14 @@ export function getImportDialogContent(pack, { targetFolder = null } = {}) {
         </select>
       </div>
       <div class="form-group">
-        <label>
-          <input type="checkbox" name="preserveFolders" checked />
-          Preserve exported folder structure when possible
-        </label>
+        <label><input type="checkbox" name="preserveFolders" checked /> Preserve exported folder structure when possible</label>
       </div>
       <div class="form-group">
-        <label>
-          <input type="checkbox" name="allowTypeMismatch" />
-          Allow importing even if exported document type differs from this pack
-        </label>
+        <label><input type="checkbox" name="allowTypeMismatch" /> Allow importing even if exported document type differs from this pack</label>
       </div>
       <p class="notes">
         Use <strong>Upsert</strong> for normal backup restore. Use <strong>Create as new</strong> to duplicate content without preserving IDs.
+        Replace mode validates the import first, downloads a recovery backup, and attempts automatic rollback if the restore fails.
         ${folderHelp}
       </p>
     </form>
@@ -370,34 +586,39 @@ export function getImportDialogContent(pack, { targetFolder = null } = {}) {
 }
 
 export async function confirmImportAction({ title = "Confirm Import", content = "<p>Import this JSON into the selected compendium?</p>" } = {}) {
-  const DialogClass = globalThis.Dialog;
-  if (typeof DialogClass?.confirm !== "function") return window.confirm("Import this JSON into the selected compendium?");
-
-  return DialogClass.confirm({
+  return confirmDialog({
     title,
     content,
-    yes: () => true,
-    no: () => false,
+    yesLabel: "Import",
+    noLabel: "Cancel",
+    yesIcon: "fa-solid fa-file-import",
     defaultYes: false
   });
 }
 
 export async function confirmReplacePack(pack) {
-  const DialogClass = globalThis.Dialog;
-  const packName = escapeHtml(pack.title ?? pack.collection);
-
-  if (typeof DialogClass?.confirm !== "function") return window.confirm(`Replace all entries in ${pack.title ?? pack.collection}?`);
-
-  return DialogClass.confirm({
+  return confirmDialog({
     title: "Replace Compendium Pack?",
     content: `
-      <p>This will delete all existing documents in <strong>${packName}</strong>, then import the selected JSON.</p>
-      <p>This cannot be undone unless you have another backup.</p>
+      <p>Replace all documents and folders in <strong>${escapeHtml(pack.title ?? pack.collection)}</strong>?</p>
+      <p>MK-Compendiums will validate the incoming data first, download a recovery JSON before deletion, and attempt automatic rollback if the import fails.</p>
     `,
-    yes: () => true,
-    no: () => false,
+    yesLabel: "Replace Pack",
+    noLabel: "Cancel",
+    yesIcon: "fa-solid fa-rotate",
     defaultYes: false
   });
+}
+
+function readPackImportForm(form) {
+  if (!form) return null;
+  const formData = new FormData(form);
+  return {
+    file: form.querySelector?.('input[name="jsonFile"]')?.files?.[0] ?? null,
+    mode: String(formData.get("mode") ?? "upsert"),
+    preserveFolders: formData.get("preserveFolders") === "on",
+    allowTypeMismatch: formData.get("allowTypeMismatch") === "on"
+  };
 }
 
 export async function openImportDialog(packIdOrPack, { targetFolderId = null } = {}) {
@@ -419,92 +640,53 @@ export async function openImportDialog(packIdOrPack, { targetFolderId = null } =
     return null;
   }
 
-  const DialogClass = globalThis.Dialog;
-  if (!DialogClass) {
-    warn("The Foundry dialog API is not available.");
+  const formResult = await waitFormDialog({
+    title: targetFolder ? `Import JSON into folder ${getFolderName(targetFolder)}` : `Import JSON into ${pack.title ?? pack.collection}`,
+    content: getImportDialogContent(pack, { targetFolder }),
+    submitLabel: "Import JSON",
+    submitIcon: "fa-solid fa-file-import",
+    getResult: readPackImportForm
+  });
+
+  if (!formResult) return null;
+  if (!formResult.file) {
+    warn("Choose a JSON file to import.");
     return null;
   }
 
-  return new Promise(resolve => {
-    new DialogClass({
-      title: targetFolder ? `Import JSON into folder ${getFolderName(targetFolder)}` : `Import JSON into ${pack.title ?? pack.collection}`,
-      content: getImportDialogContent(pack, { targetFolder }),
-      buttons: {
-        import: {
-          icon: '<i class="fas fa-file-import"></i>',
-          label: "Import JSON",
-          callback: async html => {
-            const root = html?.[0] ?? html;
-            const form = root?.querySelector?.("form") ?? root;
-            const fileInput = form?.querySelector?.('input[name="jsonFile"]');
-            const file = fileInput?.files?.[0] ?? null;
+  let payload;
+  try {
+    payload = normalizeImportPayload(await formResult.file.text());
+  } catch (err) {
+    error("Selected JSON is not a valid MK-Compendiums pack export.", err);
+    return null;
+  }
 
-            if (!file) {
-              warn("Choose a JSON file to import.");
-              resolve(null);
-              return;
-            }
+  if (formResult.mode === "replace" && !await confirmReplacePack(pack)) return null;
 
-            const formData = new FormData(form);
-            const mode = String(formData.get("mode") ?? "upsert");
-            const preserveFolders = formData.get("preserveFolders") === "on";
-            const allowTypeMismatch = formData.get("allowTypeMismatch") === "on";
+  const entryCount = payload.entries?.length ?? 0;
+  const folderCount = payload.folders?.length ?? 0;
+  const exportedPackTitle = payload.pack?.title ?? payload.pack?.label ?? payload.pack?.name ?? "JSON export";
+  const targetText = targetFolder
+    ? `folder <strong>${escapeHtml(getFolderName(targetFolder))}</strong> in <strong>${escapeHtml(pack.title ?? pack.collection)}</strong>`
+    : `pack <strong>${escapeHtml(pack.title ?? pack.collection)}</strong>`;
 
-            const jsonText = await file.text();
-            let payload;
-            try {
-              payload = normalizeImportPayload(jsonText);
-            } catch (err) {
-              error("Selected JSON is not a valid MK-Compendiums pack export.", err);
-              resolve(null);
-              return;
-            }
+  if (!await confirmImportAction({
+    title: "Confirm Compendium Import",
+    content: `
+      <p>Import <strong>${entryCount}</strong> document(s) and <strong>${folderCount}</strong> folder(s) from <strong>${escapeHtml(exportedPackTitle)}</strong> into ${targetText}?</p>
+      <p><strong>Mode:</strong> ${escapeHtml(formResult.mode)}</p>
+      <p class="notes">The import is preflight-validated before writes begin. Locked packs are only unlocked after an additional confirmation and are re-locked afterward.</p>
+    `
+  })) return null;
 
-            if (mode === "replace" && !await confirmReplacePack(pack)) {
-              resolve(null);
-              return;
-            }
-
-            const entryCount = payload.entries?.length ?? 0;
-            const folderCount = payload.folders?.length ?? 0;
-            const exportedPackTitle = payload.pack?.title ?? payload.pack?.label ?? payload.pack?.name ?? "JSON export";
-            const targetText = targetFolder
-              ? `folder <strong>${escapeHtml(getFolderName(targetFolder))}</strong> in <strong>${escapeHtml(pack.title ?? pack.collection)}</strong>`
-              : `pack <strong>${escapeHtml(pack.title ?? pack.collection)}</strong>`;
-
-            if (!await confirmImportAction({
-              title: "Confirm Compendium Import",
-              content: `
-                <p>Import <strong>${entryCount}</strong> document(s) and <strong>${folderCount}</strong> folder(s) from <strong>${escapeHtml(exportedPackTitle)}</strong> into ${targetText}?</p>
-                <p><strong>Mode:</strong> ${escapeHtml(mode)}</p>
-                <p class="notes">This will change compendium data. Make sure you have a backup if you are updating existing entries.</p>
-              `
-            })) {
-              resolve(null);
-              return;
-            }
-
-            const result = await importPackFromPayload(pack, payload, {
-              mode,
-              preserveFolders,
-              allowTypeMismatch,
-              preserveIds: mode !== "new",
-              preserveFolderIds: mode !== "new",
-              targetFolderId
-            });
-
-            resolve(result);
-          }
-        },
-        cancel: {
-          icon: '<i class="fas fa-times"></i>',
-          label: "Cancel",
-          callback: () => resolve(null)
-        }
-      },
-      default: "import",
-      close: () => resolve(null)
-    }).render(true);
+  return importPackFromPayload(pack, payload, {
+    mode: formResult.mode,
+    preserveFolders: formResult.preserveFolders,
+    allowTypeMismatch: formResult.allowTypeMismatch,
+    preserveIds: formResult.mode !== "new",
+    preserveFolderIds: formResult.mode !== "new",
+    targetFolderId
   });
 }
 
@@ -519,7 +701,6 @@ export async function createWorldCompendiumForExportBlock(packExport, targetFold
 
   const label = exportedPack.label ?? exportedPack.title ?? exportedPack.name ?? "Imported Compendium";
   const name = getAvailableWorldPackName(exportedPack.name ?? label);
-
   const metadata = {
     name,
     label,
@@ -530,19 +711,17 @@ export async function createWorldCompendiumForExportBlock(packExport, targetFold
 
   const pack = await compendiumClass.createCompendium(metadata);
 
-  if (targetFolder && typeof pack?.setFolder === "function") {
-    await pack.setFolder(targetFolder);
-  }
+  if (targetFolder && typeof pack?.setFolder === "function") await pack.setFolder(targetFolder);
 
   if (pack?.locked && typeof pack.configure === "function") {
     try {
       await pack.configure({ locked: false });
     } catch (err) {
-      console.warn(`${MODULE_ID} v${MODULE_VERSION} | Created pack could not be unlocked`, pack, err);
+      console.warn(`${MODULE_ID} v${getModuleVersion()} | Created pack could not be unlocked`, pack, err);
     }
   }
 
-  ui.compendium?.render?.(false);
+  ui.compendium?.render?.({ force: false });
   return pack;
 }
 
@@ -562,51 +741,46 @@ export function getDirectoryImportDialogContent(folder) {
           <option value="upsert" selected>Upsert - create new entries and update matching IDs</option>
           <option value="add">Add only - skip entries whose IDs already exist</option>
           <option value="new">Create as new - ignore exported IDs</option>
-          <option value="replace">Replace matching packs - delete target pack entries first</option>
+          <option value="replace">Replace matching packs - backup, delete, then restore</option>
         </select>
       </div>
-      <div class="form-group">
-        <label>
-          <input type="checkbox" name="preserveFolders" checked />
-          Preserve exported folder structures inside each matching pack
-        </label>
-      </div>
-      <div class="form-group">
-        <label>
-          <input type="checkbox" name="allowTypeMismatch" />
-          Allow importing even if exported document type differs from the matched pack
-        </label>
-      </div>
-      <div class="form-group">
-        <label>
-          <input type="checkbox" name="createMissingPacks" checked />
-          Create missing world compendium packs inside this folder
-        </label>
-      </div>
+      <div class="form-group"><label><input type="checkbox" name="preserveFolders" checked /> Preserve exported folder structures inside each matching pack</label></div>
+      <div class="form-group"><label><input type="checkbox" name="allowTypeMismatch" /> Allow importing even if exported document type differs from the matched pack</label></div>
+      <div class="form-group"><label><input type="checkbox" name="createMissingPacks" checked /> Create missing world compendium packs inside this folder</label></div>
       <p class="notes">
-        This imports a multi-pack JSON made by exporting a Compendium Directory folder.
-        It matches exported packs to packs already present under this folder. If enabled, missing packs are created as world compendiums and placed inside the selected Compendium Directory folder.
+        Multi-pack imports use a shared reference map so compendium UUIDs can follow packs and documents that receive new IDs.
+        Replace mode creates a recovery backup for every matching pack before deletion.
       </p>
     </form>
   `;
 }
 
 export async function confirmReplaceDirectoryPacks(folder, packCount) {
-  const DialogClass = globalThis.Dialog;
-  const folderName = escapeHtml(getFolderName(folder));
-
-  if (typeof DialogClass?.confirm !== "function") return window.confirm(`Replace entries in ${packCount} matching pack(s) under ${getFolderName(folder)}?`);
-
-  return DialogClass.confirm({
+  return confirmDialog({
     title: "Replace Matching Compendium Packs?",
     content: `
-      <p>This will delete existing documents from <strong>${packCount}</strong> matching pack(s) under <strong>${folderName}</strong>, then import the selected JSON.</p>
-      <p>This cannot be undone unless you have another backup.</p>
+      <p>Replace existing content in <strong>${packCount}</strong> matching pack(s) under <strong>${escapeHtml(getFolderName(folder))}</strong>?</p>
+      <p>Each pack is preflight-validated and receives its own recovery JSON before deletion. Failed replacements attempt automatic rollback.</p>
     `,
-    yes: () => true,
-    no: () => false,
+    yesLabel: "Replace Packs",
+    noLabel: "Cancel",
+    yesIcon: "fa-solid fa-rotate",
     defaultYes: false
   });
+}
+
+function sourcePackIdForExportBlock(packExport) {
+  const metadata = packExport?.pack ?? {};
+  return metadata.id ?? metadata.collection ?? (metadata.packageName && metadata.name ? `${metadata.packageName}.${metadata.name}` : null);
+}
+
+function buildDirectoryReferencePlan(importPairs, { preserveIds = true } = {}) {
+  return importPairs.map(({ packExport, targetPack }) => ({
+    sourcePackId: sourcePackIdForExportBlock(packExport),
+    targetPackId: targetPack.collection,
+    documentName: packExport?.pack?.documentName ?? targetPack.documentName ?? targetPack.metadata?.type ?? "",
+    documentIdMap: buildDocumentIdMap(packExport?.entries ?? [], { preserveIds })
+  })).filter(entry => entry.sourcePackId && entry.targetPackId);
 }
 
 export async function importCompendiumDirectoryFolderFromPayload(element, jsonTextOrPayload, options = {}) {
@@ -647,7 +821,6 @@ export async function importCompendiumDirectoryFolderFromPayload(element, jsonTe
       if (!targetFolderId) throw new Error("Cannot create missing compendium packs because the target folder ID could not be resolved.");
 
       notifyInfo(`Creating ${missing.length} missing compendium pack(s) inside "${folderName}".`);
-
       for (const packExport of missing) {
         const createdPack = await createWorldCompendiumForExportBlock(packExport, targetFolderId);
         if (createdPack) createdPairs.push({ packExport, targetPack: createdPack, created: true });
@@ -655,16 +828,20 @@ export async function importCompendiumDirectoryFolderFromPayload(element, jsonTe
     }
 
     const allImports = [...matches, ...createdPairs];
-
     if (!allImports.length) {
       warn(`No compendium packs could be matched or created under folder "${folderName}".`);
       return { importedPacks: 0, createdPacks: 0, skippedPacks: skipped.length, results: [] };
     }
 
-    notifyInfo(`Importing ${allImports.length} pack(s) into compendium folder "${folderName}".`);
+    const preserveIds = options.preserveIds ?? options.mode !== "new";
+    const referencePlan = buildDirectoryReferencePlan(allImports, { preserveIds });
+    const mapBySourcePack = new Map(referencePlan.map(entry => [entry.sourcePackId, entry.documentIdMap]));
+
+    notifyInfo(`Importing ${allImports.length} pack(s) into compendium folder "${folderName}" with a shared cross-pack reference map.`);
 
     const results = [];
     for (const { packExport, targetPack } of allImports) {
+      const sourcePackId = sourcePackIdForExportBlock(packExport);
       const result = await importPackFromPayload(targetPack, {
         schema: payload.schema,
         exportScope: "pack-from-directory-folder",
@@ -672,13 +849,17 @@ export async function importCompendiumDirectoryFolderFromPayload(element, jsonTe
         pack: packExport.pack,
         entries: packExport.entries ?? [],
         folders: packExport.folders ?? []
-      }, options);
+      }, {
+        ...options,
+        referencePlan,
+        documentIdMap: mapBySourcePack.get(sourcePackId) ?? undefined,
+        packageWriteConfirmed: options.packageWriteConfirmed ?? false
+      });
       if (result) results.push(result);
     }
 
     notifyInfo(`Folder import complete: ${results.length} pack(s) imported, ${createdPairs.length} pack(s) created, ${skipped.length} pack(s) skipped.`);
-
-    ui.compendium?.render?.(false);
+    ui.compendium?.render?.({ force: false });
 
     return {
       folder: documentIdOf(folder),
@@ -686,12 +867,25 @@ export async function importCompendiumDirectoryFolderFromPayload(element, jsonTe
       createdPacks: createdPairs.length,
       skippedPacks: skipped.length,
       skipped,
+      referencePlanSize: referencePlan.length,
       results
     };
   } catch (err) {
     error(`Failed to import compendium folder: ${folderName}`, err);
     return null;
   }
+}
+
+function readDirectoryImportForm(form) {
+  if (!form) return null;
+  const formData = new FormData(form);
+  return {
+    file: form.querySelector?.('input[name="jsonFile"]')?.files?.[0] ?? null,
+    mode: String(formData.get("mode") ?? "upsert"),
+    preserveFolders: formData.get("preserveFolders") === "on",
+    allowTypeMismatch: formData.get("allowTypeMismatch") === "on",
+    createMissingPacks: formData.get("createMissingPacks") === "on"
+  };
 }
 
 export async function openCompendiumDirectoryFolderImportDialog(element) {
@@ -701,80 +895,44 @@ export async function openCompendiumDirectoryFolderImportDialog(element) {
   }
 
   const folder = getDirectoryFolderDataFromElement(element);
-  const DialogClass = globalThis.Dialog;
-  if (!DialogClass) {
-    warn("The Foundry dialog API is not available.");
+  const formResult = await waitFormDialog({
+    title: `Import JSON into compendium folder ${getFolderName(folder)}`,
+    content: getDirectoryImportDialogContent(folder),
+    submitLabel: "Import JSON",
+    submitIcon: "fa-solid fa-file-import",
+    getResult: readDirectoryImportForm
+  });
+
+  if (!formResult) return null;
+  if (!formResult.file) {
+    warn("Choose a JSON file to import.");
     return null;
   }
 
-  return new Promise(resolve => {
-    new DialogClass({
-      title: `Import JSON into compendium folder ${getFolderName(folder)}`,
-      content: getDirectoryImportDialogContent(folder),
-      buttons: {
-        import: {
-          icon: '<i class="fas fa-file-import"></i>',
-          label: "Import JSON",
-          callback: async html => {
-            const root = html?.[0] ?? html;
-            const form = root?.querySelector?.("form") ?? root;
-            const fileInput = form?.querySelector?.('input[name="jsonFile"]');
-            const file = fileInput?.files?.[0] ?? null;
+  let payload;
+  try {
+    payload = normalizeDirectoryImportPayload(await formResult.file.text());
+  } catch (err) {
+    error("Selected JSON is not a valid MK-Compendiums directory-folder export.", err);
+    return null;
+  }
 
-            if (!file) {
-              warn("Choose a JSON file to import.");
-              resolve(null);
-              return;
-            }
+  if (!await confirmImportAction({
+    title: "Confirm Compendium Folder Import",
+    content: `
+      <p>Import <strong>${payload.packs?.length ?? 0}</strong> pack export(s) containing <strong>${payload.count ?? 0}</strong> document(s) into compendium folder <strong>${escapeHtml(getFolderName(folder))}</strong>?</p>
+      <p><strong>Mode:</strong> ${escapeHtml(formResult.mode)}</p>
+      <p><strong>Create missing packs:</strong> ${formResult.createMissingPacks ? "Yes" : "No"}</p>
+      <p class="notes">Cross-pack compendium UUIDs are remapped when target pack or document IDs change.</p>
+    `
+  })) return null;
 
-            const formData = new FormData(form);
-            const mode = String(formData.get("mode") ?? "upsert");
-            const preserveFolders = formData.get("preserveFolders") === "on";
-            const allowTypeMismatch = formData.get("allowTypeMismatch") === "on";
-            const createMissingPacks = formData.get("createMissingPacks") === "on";
-            const jsonText = await file.text();
-            let payload;
-            try {
-              payload = normalizeDirectoryImportPayload(jsonText);
-            } catch (err) {
-              error("Selected JSON is not a valid MK-Compendiums directory-folder export.", err);
-              resolve(null);
-              return;
-            }
-
-            if (!await confirmImportAction({
-              title: "Confirm Compendium Folder Import",
-              content: `
-                <p>Import <strong>${payload.packs?.length ?? 0}</strong> pack export(s) containing <strong>${payload.count ?? 0}</strong> document(s) into compendium folder <strong>${escapeHtml(getFolderName(folder))}</strong>?</p>
-                <p><strong>Mode:</strong> ${escapeHtml(mode)}</p>
-                <p><strong>Create missing packs:</strong> ${createMissingPacks ? "Yes" : "No"}</p>
-                <p class="notes">This will change compendium data. Make sure you have a backup if you are updating existing entries.</p>
-              `
-            })) {
-              resolve(null);
-              return;
-            }
-
-            const result = await importCompendiumDirectoryFolderFromPayload(element, payload, {
-              mode,
-              preserveFolders,
-              allowTypeMismatch,
-              createMissingPacks,
-              preserveIds: mode !== "new",
-              preserveFolderIds: mode !== "new"
-            });
-
-            resolve(result);
-          }
-        },
-        cancel: {
-          icon: '<i class="fas fa-times"></i>',
-          label: "Cancel",
-          callback: () => resolve(null)
-        }
-      },
-      default: "import",
-      close: () => resolve(null)
-    }).render(true);
+  return importCompendiumDirectoryFolderFromPayload(element, payload, {
+    mode: formResult.mode,
+    preserveFolders: formResult.preserveFolders,
+    allowTypeMismatch: formResult.allowTypeMismatch,
+    createMissingPacks: formResult.createMissingPacks,
+    preserveIds: formResult.mode !== "new",
+    preserveFolderIds: formResult.mode !== "new"
   });
 }

@@ -1,4 +1,5 @@
-import { MODULE_ID, MODULE_VERSION, EXPORT_SCHEMA } from './constants.js';
+import { MODULE_ID, getModuleVersion, EXPORT_SCHEMA } from './constants.js';
+import { confirmDialog } from './dialogs.js';
 import {
   buildExporterMetadata,
   collectPackFolderTree,
@@ -28,9 +29,9 @@ export function buildExportPayload(pack, entries, folders, { scope = "pack", roo
     exportedWith: {
       moduleId: MODULE_ID,
       moduleTitle: "MK-Compendiums",
-      moduleVersion: MODULE_VERSION
+      moduleVersion: getModuleVersion()
     },
-    exportedVersion: MODULE_VERSION,
+    exportedVersion: getModuleVersion(),
     exportedAt,
     exportScope: scope,
     exporter: buildExporterMetadata(exportedAt, scope),
@@ -53,9 +54,9 @@ export function buildCompendiumDirectoryFolderExportPayload(folder, packs) {
     exportedWith: {
       moduleId: MODULE_ID,
       moduleTitle: "MK-Compendiums",
-      moduleVersion: MODULE_VERSION
+      moduleVersion: getModuleVersion()
     },
-    exportedVersion: MODULE_VERSION,
+    exportedVersion: getModuleVersion(),
     exportedAt,
     exportScope: "compendium-directory-folder",
     exporter: buildExporterMetadata(exportedAt, "compendium-directory-folder"),
@@ -73,19 +74,22 @@ export function buildCompendiumDirectoryFolderExportPayload(folder, packs) {
   };
 }
 
-export function saveExportPayload(payload, pack, { folder = null } = {}) {
+export function saveExportPayload(payload, pack, { folder = null, prefix = "" } = {}) {
   const packId = pack.collection ?? pack.metadata?.id ?? pack.metadata?.name ?? "unknown-pack";
   const scopePart = folder ? `folder-${slugifyFilePart(getFolderName(folder))}` : "pack";
-  const filename = `${slugifyFilePart(game.world?.id)}-${slugifyFilePart(packId)}-${scopePart}-mk-compendiums-v${MODULE_VERSION}.json`;
+  const prefixPart = prefix ? `${slugifyFilePart(prefix)}-` : "";
+  const filename = `${prefixPart}${slugifyFilePart(game.world?.id)}-${slugifyFilePart(packId)}-${scopePart}-mk-compendiums-v${getModuleVersion()}.json`;
 
   saveDataToFile(JSON.stringify(payload, null, 2), "application/json", filename);
+  return filename;
 }
 
 export function saveCompendiumDirectoryFolderExportPayload(payload, folder) {
   const folderName = getFolderName(folder);
-  const filename = `${slugifyFilePart(game.world?.id)}-compendium-folder-${slugifyFilePart(folderName)}-mk-compendiums-v${MODULE_VERSION}.json`;
+  const filename = `${slugifyFilePart(game.world?.id)}-compendium-folder-${slugifyFilePart(folderName)}-mk-compendiums-v${getModuleVersion()}.json`;
 
   saveDataToFile(JSON.stringify(payload, null, 2), "application/json", filename);
+  return filename;
 }
 
 export function packHasDocumentExportApi(pack) {
@@ -108,35 +112,14 @@ export async function getPackExportBlock(pack) {
 }
 
 export async function confirmExportAction({ title = "Confirm Export", message = "Export this compendium data to JSON?" } = {}) {
-  const DialogClass = globalThis.Dialog;
-  if (!DialogClass) return window.confirm(message);
-
-  return new Promise(resolve => {
-    let settled = false;
-    const finish = value => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-
-    new DialogClass({
-      title,
-      content: `<p>${escapeHtml(message)}</p>`,
-      buttons: {
-        export: {
-          icon: '<i class="fas fa-file-export"></i>',
-          label: "Export",
-          callback: () => finish(true)
-        },
-        cancel: {
-          icon: '<i class="fas fa-times"></i>',
-          label: "Cancel",
-          callback: () => finish(false)
-        }
-      },
-      default: "export",
-      close: () => finish(false)
-    }).render(true);
+  return confirmDialog({
+    title,
+    content: `<p>${escapeHtml(message)}</p>`,
+    yesLabel: "Export",
+    noLabel: "Cancel",
+    yesIcon: "fa-solid fa-file-export",
+    noIcon: "fa-solid fa-xmark",
+    defaultYes: true
   });
 }
 
@@ -168,7 +151,7 @@ export async function exportCompendiumDirectoryFolderToJson(element) {
     for (const packId of packIds) {
       const pack = resolvePack(packId);
       if (!packHasDocumentExportApi(pack)) {
-        console.warn(`${MODULE_ID} v${MODULE_VERSION} | Skipping non-pack entry while exporting compendium folder`, packId, pack);
+        console.warn(`${MODULE_ID} v${getModuleVersion()} | Skipping non-pack entry while exporting compendium folder`, packId, pack);
         continue;
       }
 
