@@ -51,7 +51,6 @@ function addToolToControl(control) {
 
 export function registerCompendiumBrowserSceneControl() {
   Hooks.on("getSceneControlButtons", controls => {
-    // Foundry v13+ passes a Record<string, SceneControl>.
     const tokenControl = controls?.tokens ?? controls?.token;
     if (addToolToControl(tokenControl)) return;
 
