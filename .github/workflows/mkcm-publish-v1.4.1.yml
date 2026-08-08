@@ -1,0 +1,70 @@
+name: MK-Compendiums Publish v1.4.1
+
+on:
+  push:
+    branches:
+      - agent/v1.4.1-hardening
+    paths:
+      - .mkcm-upload/ready
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout publish branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild tested package
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .mkcm-upload/part-* | tr -d '\n\r' | base64 --decode > /tmp/mk-compendiums.zip
+          echo "3b08e8f9237f9b64bdef0b589153042646bb74c6bfb8ce596e71955f6e6ca7e7  /tmp/mk-compendiums.zip" | sha256sum --check --strict
+          unzip -oq /tmp/mk-compendiums.zip -d .
+          rm -f scripts/styles.js .mkcm-publish-probe
+          rm -rf .mkcm-upload
+          rm -f .github/workflows/mkcm-publish-v1.4.1.yml
+
+      - name: Validate module
+        shell: bash
+        run: |
+          set -euo pipefail
+          node -e 'const m=require("./module.json"); if(m.version!=="1.4.1") process.exit(1); if(!m.styles?.includes("styles/mk-compendiums.css")) process.exit(1);'
+          for file in scripts/*.js; do node --check "$file"; done
+          test -f styles/mk-compendiums.css
+          test ! -e scripts/styles.js
+
+      - name: Commit tested v1.4.1 source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Release v1.4.1 hardening"
+            git push origin HEAD:agent/v1.4.1-hardening
+          fi
+
+      - name: Create v1.4.1 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="$(git rev-parse HEAD)"
+          if gh release view v1.4.1 >/dev/null 2>&1; then
+            gh release upload v1.4.1 /tmp/mk-compendiums.zip#mk-compendiums.zip module.json#module.json --clobber
+          else
+            gh release create v1.4.1 \
+              --target "$TARGET" \
+              --title "MK-Compendiums v1.4.1" \
+              --notes "Hardening release: safer imports and replace rollback, explicit locked/package pack handling, player-visible pack filtering, optimized/degraded-index search reporting, DialogV2 migration, cross-pack UUID remapping, and stylesheet cleanup." \
+              /tmp/mk-compendiums.zip#mk-compendiums.zip \
+              module.json#module.json
+          fi
