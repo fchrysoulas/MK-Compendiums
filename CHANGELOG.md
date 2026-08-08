@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.2
+
+- Simplified compendium pack rows to display only the pack title, removing the document type, package name, and locked-status metadata.
+
 ## 1.4.1
 
 - Filtered player-facing browser packs through Foundry's current-user compendium visibility state so hidden packs are no longer exposed by the custom browser.

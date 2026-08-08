@@ -151,7 +151,7 @@
 .mkcm-pack-title, .mkcm-result-title { display: block; overflow: hidden; color: var(--mkcm-muted); text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .mkcm-pack-row:hover .mkcm-pack-title, .mkcm-pack-row.active .mkcm-pack-title { color: var(--mkcm-text); }
 .mkcm-pack-row.active .mkcm-pack-title { color: #ffdfaa; font-weight: 700; }
-.mkcm-pack-meta, .mkcm-result-meta { display: block; overflow: hidden; color: var(--mkcm-faint); text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.mkcm-result-meta { display: block; overflow: hidden; color: var(--mkcm-faint); text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
 .mkcm-row-tools { flex: 0 0 auto; display: flex; align-items: center; gap: 3px; margin-left: auto; padding-right: 4px; opacity: 0; transition: opacity 120ms ease; }
 .mkcm-pack-row:hover .mkcm-row-tools, .mkcm-pack-row:focus-within .mkcm-row-tools, .mkcm-broken-link-row .mkcm-row-tools { opacity: 1; }
 .mkcm-row-tools button { width: 26px; min-width: 26px; height: 26px; min-height: 26px; margin: 0; padding: 0; border: 1px solid transparent; border-radius: 6px; display: grid; place-items: center; background: transparent; box-shadow: none; color: var(--mkcm-faint); font-size: 9px; }

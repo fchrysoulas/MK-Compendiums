@@ -383,7 +383,6 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       <div class="mkcm-pack-row ${this.browserState.packId === pack.id && !this.browserState.folderId ? "active" : ""}">
         <button type="button" class="mkcm-pack-main" data-action="select-pack" title="Browse this pack">
           <span class="mkcm-pack-title"><i class="fas fa-book"></i> ${escapeHtml(pack.title)}</span>
-          <span class="mkcm-pack-meta">${escapeHtml(pack.documentName)} · ${escapeHtml(pack.packageName)}${pack.locked ? " · locked" : ""}</span>
         </button>
         <div class="mkcm-row-tools">
           <button type="button" data-action="view-pack" title="Open this compendium"><i class="fas fa-eye"></i></button>
