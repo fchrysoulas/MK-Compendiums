@@ -8,6 +8,30 @@
     "verified": "14",
     "maximum": "14"
   },
+  "flags": {
+    "mk-module-hub": {
+      "schemaVersion": 1,
+      "category": "content-compendiums",
+      "status": "stable",
+      "icon": "fa-solid fa-boxes-stacked",
+      "summary": "Browse and search visible compendiums for all users, with GM-only tools to safely export, import, restore, and audit compendium data.",
+      "tags": [
+        "Compendiums",
+        "Search",
+        "Export",
+        "Import",
+        "GM Tools"
+      ],
+      "features": [
+        "Visible compendium browsing and folder trees",
+        "Search and filter by content and package metadata",
+        "Entry and pack opening with UUID drag-and-drop",
+        "Pack and folder export with structure and metadata",
+        "Upsert, add-only, create-new, and replace imports",
+        "Broken compendium link auditing"
+      ]
+    }
+  },
   "authors": [
     {
       "name": "Mikrokouneli"
