@@ -273,7 +273,7 @@ function prepareEntrySources(rawEntries, {
     // Rewrite fully-qualified compendium references first so an ID collision in a
     // different pack cannot be mistaken for a same-pack document reference.
     const withGlobalCompendiumReferences = rewriteCompendiumReferences(withFolder, referencePlan);
-    return rewriteDocumentReferences(withGlobalCompendiumReferences, documentIdMap);
+    return rewriteDocumentReferences(withGlobalCompendiumReferences, documentIdMap, { skipCompendiumReferences: true });
   });
 }
 
@@ -391,6 +391,7 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
   let documentClass;
   let rawEntries;
   let documentIdMap;
+  let referencePlan;
   let preflightEntries;
 
   try {
@@ -416,12 +417,20 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
       ? options.documentIdMap
       : buildDocumentIdMap(rawEntries, { preserveIds });
 
+    const sourcePackId = sourcePackIdForExportBlock(payload);
+    referencePlan = options.referencePlan ?? (sourcePackId ? [{
+      sourcePackId,
+      targetPackId: pack.collection,
+      documentName: exportedDocumentName ?? targetDocumentName,
+      documentIdMap
+    }] : []);
+
     preflightEntries = prepareEntrySources(rawEntries, {
       preserveIds,
       preserveFolders,
       targetFolderId,
       documentIdMap,
-      referencePlan: options.referencePlan ?? []
+      referencePlan
     });
 
     preflightImportSources(pack, documentClass, preflightEntries, preserveFolders ? payload.folders : [], { preserveFolderIds });
@@ -475,7 +484,7 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
       targetFolderId,
       documentIdMap,
       folderIdMap: folderStats.idMap,
-      referencePlan: options.referencePlan ?? []
+      referencePlan
     });
 
     let created = [];
@@ -520,7 +529,7 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
       recoveryBackup: recoverySnapshot?.filename ?? null,
       references: {
         remappedDocumentIds: Array.from(documentIdMap.entries()).filter(([oldId, newId]) => oldId && newId && oldId !== newId).length,
-        crossPackPlanSize: options.referencePlan?.length ?? 0
+        crossPackPlanSize: referencePlan.length
       },
       folders: {
         created: folderStats.created,
@@ -531,6 +540,7 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
     };
 
     notifyInfo(`Import complete: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped. Folders: ${result.folders.created} created, ${result.folders.updated} updated. References remapped: ${result.references.remappedDocumentIds}.`);
+    globalThis.Hooks?.callAll?.(`${MODULE_ID}.importPack`, pack, result);
     return result;
   } catch (err) {
     if (mode === "replace" && replaceDeletionStarted && recoverySnapshot) {

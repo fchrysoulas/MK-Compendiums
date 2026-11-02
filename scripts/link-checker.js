@@ -299,21 +299,6 @@ function extractReferencesFromString(value, path) {
     });
   }
 
-  const exactUuid = normalizeReferenceUuid(text);
-  if (text.trim() && isPotentialCompendiumUuid(exactUuid)) {
-    addReference(references, seen, {
-      syntax: "direct",
-      rawUuid: text.trim(),
-      label: "",
-      path,
-      pathLabel,
-      sourceValue: text,
-      start: 0,
-      end: text.length,
-      exact: true
-    });
-  }
-
   for (const match of text.matchAll(DIRECT_UUID_PATTERN)) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
@@ -329,6 +314,24 @@ function extractReferencesFromString(value, path) {
       sourceValue: text,
       start,
       end: start + rawUuid.length
+    });
+  }
+
+  // Bare legacy references have no Compendium prefix for the token matcher.
+  // Only accept a whole UUID here; prose and inline links are handled above.
+  const trimmed = text.trim();
+  if (!references.length && /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2,}$/.test(trimmed)) {
+    const start = text.indexOf(trimmed);
+    addReference(references, seen, {
+      syntax: "direct",
+      rawUuid: trimmed,
+      label: "",
+      path,
+      pathLabel,
+      sourceValue: text,
+      start,
+      end: start + trimmed.length,
+      exact: true
     });
   }
 
@@ -652,6 +655,32 @@ async function validateReplacementUuid(replacementUuid, { clear = false } = {}) 
   return normalizedReplacement;
 }
 
+function getItemReferenceUpdate(itemDocument, link, { replacementUuid, clear }) {
+  const referencePath = link.referencePath ?? (link.actorId ? link.path?.slice(2) : link.path);
+  const source = deepClone(getDocumentSource(itemDocument));
+  const currentValue = getValueAtPath(source, referencePath);
+  if (typeof currentValue !== "string") {
+    warn("The stored reference is no longer a string and cannot be updated automatically.");
+    return null;
+  }
+
+  const nextValue = getFixedStringValue(currentValue, link, { replacementUuid, clear });
+  if (nextValue === currentValue) {
+    warn("No matching broken compendium UUID was found at that path. Re-run the link check and try again.");
+    return null;
+  }
+  if (!setValueAtPath(source, referencePath, nextValue)) {
+    warn("Could not update the broken compendium UUID path.");
+    return null;
+  }
+
+  // Foundry array fields must be updated as arrays, not dotted numeric paths.
+  const arrayIndex = referencePath.findIndex(part => typeof part === "number");
+  const updateParts = arrayIndex < 0 ? referencePath : referencePath.slice(0, arrayIndex);
+  const updatePath = getUpdatePath(updateParts);
+  return updatePath ? { [updatePath]: getValueAtPath(source, updateParts) } : source;
+}
+
 async function applyWorldBrokenLinkFix(link, { replacementUuid = "", clear = false } = {}) {
   const normalizedReplacement = await validateReplacementUuid(replacementUuid, { clear });
   if (normalizedReplacement === null) return null;
@@ -670,32 +699,9 @@ async function applyWorldBrokenLinkFix(link, { replacementUuid = "", clear = fal
       return null;
     }
 
-    const referencePath = link.referencePath ?? link.path;
-    const source = deepClone(getDocumentSource(itemDocument));
-    const currentValue = getValueAtPath(source, referencePath);
-    if (typeof currentValue !== "string") {
-      warn("The stored reference is no longer a string and cannot be updated automatically.");
-      return null;
-    }
-
-    const nextValue = getFixedStringValue(currentValue, link, { replacementUuid: normalizedReplacement, clear });
-    if (nextValue === currentValue) {
-      warn("No matching broken compendium UUID was found at that path. Re-run the link check and try again.");
-      return null;
-    }
-
-    const updatePath = getUpdatePath(referencePath);
-    let updateData = isEmbeddedItem ? { _id: link.itemId } : {};
-    if (updatePath) updateData[updatePath] = nextValue;
-    else {
-      if (!setValueAtPath(source, referencePath, nextValue)) {
-        warn("Could not update the broken compendium UUID path.");
-        return null;
-      }
-      source._id = link.itemId;
-      updateData = source;
-      if (!isEmbeddedItem) delete updateData._id;
-    }
+    const updateData = getItemReferenceUpdate(itemDocument, link, { replacementUuid: normalizedReplacement, clear });
+    if (!updateData) return null;
+    if (isEmbeddedItem) updateData._id = link.itemId;
 
     if (isEmbeddedItem) await document.updateEmbeddedDocuments("Item", [updateData]);
     else await document.update(updateData);
@@ -741,35 +747,23 @@ export async function applyBrokenLinkFix(link, { replacementUuid = "", clear = f
       return null;
     }
 
-    const source = deepClone(getDocumentSource(document));
-    const currentValue = getValueAtPath(source, link.path);
-    if (typeof currentValue !== "string") {
-      warn("The stored reference is no longer a string and cannot be updated automatically.");
+    const isEmbeddedItem = !!link.actorId;
+    const itemDocument = isEmbeddedItem ? document.items?.get?.(link.itemId) : document;
+    if (!itemDocument) {
+      warn("Source item not found.");
       return null;
     }
 
-    const nextValue = getFixedStringValue(currentValue, link, { replacementUuid: normalizedReplacement, clear });
-    if (nextValue === currentValue) {
-      warn("No matching broken compendium UUID was found at that path. Re-run the link check and try again.");
-      return null;
-    }
+    const updateData = getItemReferenceUpdate(itemDocument, link, { replacementUuid: normalizedReplacement, clear });
+    if (!updateData) return null;
+    updateData._id = isEmbeddedItem ? link.itemId : link.documentId;
 
-    const documentClass = getDocumentClassForPack(pack);
-    if (!documentClass?.updateDocuments) throw new Error(`Could not resolve document class for ${pack.documentName ?? "this pack"}.`);
-
-    const updatePath = getUpdatePath(link.path);
-    let updateData = { _id: link.documentId };
-    if (updatePath) updateData[updatePath] = nextValue;
+    if (isEmbeddedItem) await document.updateEmbeddedDocuments("Item", [updateData]);
     else {
-      if (!setValueAtPath(source, link.path, nextValue)) {
-        warn("Could not update the broken compendium UUID path.");
-        return null;
-      }
-      source._id = link.documentId;
-      updateData = source;
+      const documentClass = getDocumentClassForPack(pack);
+      if (!documentClass?.updateDocuments) throw new Error(`Could not resolve document class for ${pack.documentName ?? "this pack"}.`);
+      await documentClass.updateDocuments([updateData], { pack: pack.collection });
     }
-
-    await documentClass.updateDocuments([updateData], { pack: pack.collection });
     resetCompendiumIndexCache(pack);
     pack.render?.({ force: false });
     ui.compendium?.render?.({ force: false });

@@ -1,8 +1,9 @@
 import { MODULE_ID } from './constants.js';
 import { getPackIdFromContextElement, optionAlreadyRegistered } from './utils.js';
-import { openCompendiumBrowser, openCompendiumBrowserFromControl } from './browser.js';
+import { openCompendiumBrowser, openCompendiumBrowserFromControl, refreshCompendiumBrowserAfterImport } from './browser.js';
 
 export function registerCompendiumContextMenu() {
+  Hooks.on(`${MODULE_ID}.importPack`, pack => refreshCompendiumBrowserAfterImport(pack));
   Hooks.on("getCompendiumDirectoryEntryContext", (_html, options) => {
     if (!optionAlreadyRegistered(options, "Open MK Compendium Browser")) {
       options.push({

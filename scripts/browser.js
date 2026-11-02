@@ -52,6 +52,7 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
       message: "Select a pack to browse, or search across all compendiums."
     };
     this.indexCache = new Map();
+    this._indexCacheVersions = new Map();
     this._searchRequest = 0;
     this._sidebarScrollTop = 0;
     this._listenerController = null;
@@ -112,6 +113,24 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 
   getPackCacheKey(pack) { return pack?.collection ?? pack?.metadata?.id ?? pack?.metadata?.name ?? ""; }
 
+  invalidatePackCache(pack) {
+    const packId = this.getPackCacheKey(pack);
+    if (!packId) return;
+    this.indexCache.delete(`${packId}:basic`);
+    this.indexCache.delete(`${packId}:deep`);
+    this._indexCacheVersions.set(packId, (this._indexCacheVersions.get(packId) ?? 0) + 1);
+  }
+
+  async refreshAfterPackImport(pack) {
+    this.invalidatePackCache(pack);
+    if (!this.browserState.searched) return;
+    const render = this.rendered === true;
+    if (this.browserState.linkAuditActive) return this.runBrokenLinkCheck({ render });
+    if (this.getCandidatePacks().some(candidate => this.getPackCacheKey(candidate) === this.getPackCacheKey(pack))) {
+      return this.runSearch({ render });
+    }
+  }
+
   notePackSearchFailure(pack, err) {
     const packKey = this.getPackCacheKey(pack) || getPackTitle(pack);
     if (!this._searchFailurePacks.has(packKey)) {
@@ -131,18 +150,17 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
     const packId = this.getPackCacheKey(pack);
     if (!packId) return [];
     const cacheKey = `${packId}:${deep ? "deep" : "basic"}`;
-    if (force) {
-      this.indexCache.delete(`${packId}:basic`);
-      this.indexCache.delete(`${packId}:deep`);
-    }
-    if (!this.indexCache.has(cacheKey)) {
-      this.indexCache.set(cacheKey, await getBrowserPackIndex(pack, {
-        force,
-        deep,
-        onFallback: deep ? err => this.noteDeepIndexFallback(pack, err) : null
-      }));
-    }
-    return this.indexCache.get(cacheKey) ?? [];
+    if (force) this.invalidatePackCache(pack);
+    if (this.indexCache.has(cacheKey)) return this.indexCache.get(cacheKey);
+
+    const version = this._indexCacheVersions.get(packId) ?? 0;
+    const entries = await getBrowserPackIndex(pack, {
+      force,
+      deep,
+      onFallback: deep ? err => this.noteDeepIndexFallback(pack, err) : null
+    });
+    if (version === (this._indexCacheVersions.get(packId) ?? 0)) this.indexCache.set(cacheKey, entries);
+    return entries;
   }
 
   getCandidatePacks() {
@@ -570,6 +588,15 @@ export class MkCompendiumBrowser extends FoundryApplicationV2 {
 }
 
 let mkCompendiumBrowserApp = null;
+
+export async function refreshCompendiumBrowserAfterImport(pack) {
+  if (!mkCompendiumBrowserApp) return;
+  try {
+    await mkCompendiumBrowserApp.refreshAfterPackImport(pack);
+  } catch (err) {
+    error("Failed to refresh MK Compendium Browser after import.", err);
+  }
+}
 
 function renderBrowserApplication(app) {
   try {

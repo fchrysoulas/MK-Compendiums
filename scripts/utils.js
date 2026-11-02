@@ -327,6 +327,8 @@ const REFERENCE_TEXT_MARKERS = [
   "Combat.", "Item.", "JournalEntry.", "Macro.", "Playlist.", "RollTable.", "Scene."
 ];
 
+const COMPENDIUM_REFERENCE_PATTERN = /(Compendium\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2,}|@Compendium\[[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2,}\])/g;
+
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -359,7 +361,7 @@ function replaceBoundedIdToken(value, oldId, newId) {
   return value.replace(pattern, (_match, prefix) => `${prefix}${newId}`);
 }
 
-export function rewriteStringReferences(value, idMap, { key = "", parentKey = "", isObjectKey = false } = {}) {
+export function rewriteStringReferences(value, idMap, { key = "", parentKey = "", isObjectKey = false, skipCompendiumReferences = false } = {}) {
   let next = String(value ?? "");
   if (!idMap?.size) return next;
 
@@ -368,6 +370,13 @@ export function rewriteStringReferences(value, idMap, { key = "", parentKey = ""
 
   if (!hasReferenceMarker(next) && !hasReferenceKey(key, parentKey) && !(isObjectKey && hasReferenceMarker(next))) return next;
 
+  if (skipCompendiumReferences) {
+    return next.split(COMPENDIUM_REFERENCE_PATTERN).map((part, index) => index % 2
+      ? part
+      : rewriteStringReferences(part, idMap, { key, parentKey, isObjectKey })
+    ).join("");
+  }
+
   for (const [oldId, newId] of idMap.entries()) {
     if (!oldId || !newId || oldId === newId) continue;
     next = replaceBoundedIdToken(next, oldId, newId);
@@ -375,53 +384,48 @@ export function rewriteStringReferences(value, idMap, { key = "", parentKey = ""
   return next;
 }
 
-export function rewriteValueReferences(value, idMap, key = "", parentKey = "") {
+export function rewriteValueReferences(value, idMap, key = "", parentKey = "", options = {}) {
   if (!idMap?.size) return value;
-  if (typeof value === "string") return rewriteStringReferences(value, idMap, { key, parentKey });
-  if (Array.isArray(value)) return value.map(item => rewriteValueReferences(item, idMap, key, parentKey));
+  if (typeof value === "string") return rewriteStringReferences(value, idMap, { ...options, key, parentKey });
+  if (Array.isArray(value)) return value.map(item => rewriteValueReferences(item, idMap, key, parentKey, options));
   if (value && typeof value === "object") {
     const rewritten = {};
     for (const [childKey, child] of Object.entries(value)) {
-      const rewrittenKey = rewriteStringReferences(childKey, idMap, { key: childKey, parentKey: key, isObjectKey: true });
-      rewritten[rewrittenKey] = rewriteValueReferences(child, idMap, childKey, key);
+      const rewrittenKey = rewriteStringReferences(childKey, idMap, { ...options, key: childKey, parentKey: key, isObjectKey: true });
+      rewritten[rewrittenKey] = rewriteValueReferences(child, idMap, childKey, key, options);
     }
     return rewritten;
   }
   return value;
 }
 
-export function rewriteDocumentReferences(data, documentIdMap) {
+export function rewriteDocumentReferences(data, documentIdMap, options = {}) {
   if (!documentIdMap?.size) return data;
-  return rewriteValueReferences(data, documentIdMap);
+  return rewriteValueReferences(data, documentIdMap, "", "", options);
 }
 
 function rewriteCompendiumUuidForPlan(text, plan) {
-  let next = String(text ?? "");
-  for (const entry of plan ?? []) {
-    const sourcePackId = String(entry?.sourcePackId ?? "");
-    const targetPackId = String(entry?.targetPackId ?? sourcePackId);
-    if (!sourcePackId) continue;
+  const entries = (plan ?? []).filter(entry => entry?.sourcePackId)
+    .sort((a, b) => b.sourcePackId.length - a.sourcePackId.length);
 
-    const idMap = entry?.documentIdMap instanceof Map ? entry.documentIdMap : new Map(entry?.documentIdMap ?? []);
-    const documentName = entry?.documentName ?? "";
+  // Match each original reference once so overlapping source/target pack names
+  // cannot cause one plan entry's output to be rewritten by another entry.
+  return String(text ?? "").replace(COMPENDIUM_REFERENCE_PATTERN, match => {
+    const legacy = match.startsWith("@Compendium[");
+    const target = legacy ? match.slice("@Compendium[".length, -1) : match.slice("Compendium.".length);
+    const entry = entries.find(entry => target.startsWith(`${entry.sourcePackId}.`));
+    if (!entry) return match;
 
-    const rewriteTail = tail => {
-      const parts = tail.split(".");
-      const idIndex = documentName && parts[0] === documentName ? 1 : 0;
-      const oldId = parts[idIndex];
-      const newId = idMap.get(oldId);
-      if (newId) parts[idIndex] = newId;
-      return parts.join(".");
-    };
+    const parts = target.slice(entry.sourcePackId.length + 1).split(".");
+    const idIndex = entry.documentName && parts[0] === entry.documentName ? 1 : 0;
+    const idMap = entry.documentIdMap instanceof Map ? entry.documentIdMap : new Map(entry.documentIdMap ?? []);
+    const newId = idMap.get(parts[idIndex]);
+    if (!newId) return match;
 
-    const uuidTailPattern = "([A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*)";
-    const directPattern = new RegExp(`Compendium\\.${escapeRegExp(sourcePackId)}\\.${uuidTailPattern}`, "g");
-    next = next.replace(directPattern, (_match, tail) => `Compendium.${targetPackId}.${rewriteTail(tail)}`);
-
-    const legacyPattern = new RegExp(`@Compendium\\[${escapeRegExp(sourcePackId)}\\.${uuidTailPattern}\\]`, "g");
-    next = next.replace(legacyPattern, (_match, tail) => `@Compendium[${targetPackId}.${rewriteTail(tail)}]`);
-  }
-  return next;
+    parts[idIndex] = newId;
+    const rewritten = `${entry.targetPackId ?? entry.sourcePackId}.${parts.join(".")}`;
+    return legacy ? `@Compendium[${rewritten}]` : `Compendium.${rewritten}`;
+  });
 }
 
 export function rewriteCompendiumReferences(value, referencePlan) {
