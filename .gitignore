@@ -1,5 +1,3 @@
 dist/
 *.ps1
-package.json
-tests/
 .agents/

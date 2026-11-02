@@ -299,21 +299,6 @@ function extractReferencesFromString(value, path) {
     });
   }
 
-  const exactUuid = normalizeReferenceUuid(text);
-  if (text.trim() && isPotentialCompendiumUuid(exactUuid)) {
-    addReference(references, seen, {
-      syntax: "direct",
-      rawUuid: text.trim(),
-      label: "",
-      path,
-      pathLabel,
-      sourceValue: text,
-      start: 0,
-      end: text.length,
-      exact: true
-    });
-  }
-
   for (const match of text.matchAll(DIRECT_UUID_PATTERN)) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
@@ -329,6 +314,24 @@ function extractReferencesFromString(value, path) {
       sourceValue: text,
       start,
       end: start + rawUuid.length
+    });
+  }
+
+  // Bare legacy references have no Compendium prefix for the token matcher.
+  // Only accept a whole UUID here; prose and inline links are handled above.
+  const trimmed = text.trim();
+  if (!references.length && /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2,}$/.test(trimmed)) {
+    const start = text.indexOf(trimmed);
+    addReference(references, seen, {
+      syntax: "direct",
+      rawUuid: trimmed,
+      label: "",
+      path,
+      pathLabel,
+      sourceValue: text,
+      start,
+      end: start + trimmed.length,
+      exact: true
     });
   }
 
