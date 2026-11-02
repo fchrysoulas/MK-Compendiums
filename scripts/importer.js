@@ -540,6 +540,7 @@ export async function importPackFromPayload(packIdOrPack, jsonTextOrPayload, opt
     };
 
     notifyInfo(`Import complete: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped. Folders: ${result.folders.created} created, ${result.folders.updated} updated. References remapped: ${result.references.remappedDocumentIds}.`);
+    globalThis.Hooks?.callAll?.(`${MODULE_ID}.importPack`, pack, result);
     return result;
   } catch (err) {
     if (mode === "replace" && replaceDeletionStarted && recoverySnapshot) {
