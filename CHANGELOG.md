@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.4.3
+
+- Fixed duplicate UUID detection so clearing or replacing a broken link preserves description text and unrelated links.
+- Fixed compendium actor item repairs to identify items by ID after inventory changes, reject stale references, and preserve nested arrays.
+- Fixed single-pack imports to retarget internal UUIDs to the destination pack while preserving external references and shared directory import mappings.
+- Refreshed browser search results and broken-link audits after successful imports, including protection against stale index responses.
+- Added a tracked Node test suite with 27 passing tests covering link repairs, import references, browser refresh, and runtime version metadata.
+- Removed invalid funding configuration placeholders while keeping the configured Ko-fi account.
+
 ## 1.4.2
 
 - Simplified compendium pack rows to display only the pack title, removing the document type, package name, and locked-status metadata.
